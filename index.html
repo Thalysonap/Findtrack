@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#101010">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Fintrack</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="phone-frame">
+<div class="island"></div>
+<span class="side-btn mute"></span>
+<span class="side-btn vol-up"></span>
+<span class="side-btn vol-down"></span>
+<span class="side-btn power"></span>
+<div id="app">
+  <header>
+    <div class="header-top">
+      <h1>Fin<span>track</span></h1>
+      <div class="header-actions">
+        <button class="btn-config" onclick="openMenu()" title="Menu">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7C8A82" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="hero" id="hero">
+      <div class="hero-toggle">
+        <button class="hero-toggle-btn active" id="toggleToday" onclick="setHeroView('today')">Hoje</button>
+        <button class="hero-toggle-btn" id="toggleAll" onclick="setHeroView('all')">Se pagar tudo</button>
+      </div>
+
+      <div class="hero-balance zero" id="heroBalance">R$ 0,00</div>
+      <div class="hero-sublabel" id="heroSublabel">após contas já pagas</div>
+
+      <div class="hero-stats">
+        <div class="stat stat-income">
+          <div class="stat-icon">💰</div>
+          <div class="stat-body">
+            <div class="stat-label">Entradas</div>
+            <div class="stat-value green" id="totalIncome">R$ 0,00</div>
+          </div>
+        </div>
+        <div class="stat stat-expense">
+          <div class="stat-icon">📤</div>
+          <div class="stat-body">
+            <div class="stat-label">A pagar</div>
+            <div class="stat-value red" id="totalExpense">R$ 0,00</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="progress-wrap">
+      <div class="progress-label">
+        <span id="paidCount">0 de 0 pagas</span>
+        <span id="paidPercent">0%</span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('all')"  id="tab-all">Todas</button>
+      <button class="tab"        onclick="switchTab('open')" id="tab-open">
+        Em aberto<span class="tab-badge" id="todayBadge" style="display:none"></span>
+      </button>
+      <button class="tab"        onclick="switchTab('done')" id="tab-done">Pagas</button>
+      <button class="tab"        onclick="switchTab('in')"   id="tab-in">Entradas</button>
+    </div>
+  </header>
+
+  <div class="list-wrap" id="listWrap"></div>
+
+  <div class="bottom-bar">
+    <button class="btn-add" onclick="openSheet()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0D1A12" stroke-width="3" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Adicionar
+    </button>
+  </div>
+
+  <div class="overlay" id="overlay" onclick="closeOnBg(event)">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <h2 id="sheetTitle">Nova entrada</h2>
+
+      <div class="form-group">
+        <label>Tipo</label>
+        <div class="type-toggle">
+          <button class="type-btn active-expense" id="btnExpense" onclick="setType('expense')">💸 Despesa</button>
+          <button class="type-btn" id="btnIncome"  onclick="setType('income')">💰 Receita</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Valor (R$)</label>
+        <input type="text" id="fValue" class="value-input" placeholder="R$ 0,00" inputmode="numeric" autocomplete="off">
+      </div>
+
+      <div class="form-group">
+        <label>Nome</label>
+        <input type="text" id="fName" placeholder="ex: Aluguel, Mercado..." maxlength="30" oninput="suggestCategory()">
+      </div>
+
+      <div class="form-group">
+        <label>Categoria</label>
+        <input type="hidden" id="fCategory" value="🏠 Moradia">
+        <button type="button" class="category-pill" id="categoryPill" onclick="toggleCategoryChips()">🏠 Moradia</button>
+        <div class="category-chips" id="categoryChips" style="display:none"></div>
+      </div>
+
+      <button type="button" class="date-toggle" id="dateToggle" onclick="showDateField()">📅 Adicionar vencimento</button>
+      <div class="form-group" id="dateGroup" style="display:none">
+        <label>Vencimento</label>
+        <input type="date" id="fDate">
+      </div>
+
+      <button class="btn-toggle-paid btn-toggle-done" id="btnTogglePaid" style="display:none" onclick="togglePaidFromSheet()">✓ Marcar como paga</button>
+      <button class="btn-save" onclick="saveItem()">Salvar</button>
+      <button class="btn-delete-full" id="btnDeleteFull" style="display:none" onclick="deleteFromSheet()">Excluir este item</button>
+    </div>
+  </div>
+
+  <div class="confirm-panel" id="confirmPanel" onclick="closeConfirmOnBg(event)">
+    <div class="confirm-box">
+      <div class="confirm-icon">🗑️</div>
+      <h3 class="confirm-title">Excluir item?</h3>
+      <p class="confirm-text" id="confirmText">Tem certeza que deseja excluir este item?</p>
+      <div class="confirm-actions">
+        <button class="btn-confirm-cancel" onclick="cancelDelete()">Cancelar</button>
+        <button class="btn-confirm-delete" onclick="confirmDelete()">Excluir</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="menu-panel" id="menuPanel" onclick="closeMenuOnBg(event)">
+    <div class="menu-sheet">
+      <div class="sheet-handle"></div>
+      <button class="menu-item" onclick="exportBackup()">⬇️ Exportar backup (.json)</button>
+      <button class="menu-item" onclick="triggerImport()">⬆️ Importar backup</button>
+      <button class="menu-item danger" onclick="clearAll()">🗑️ Apagar tudo</button>
+      <input type="file" id="importFile" accept="application/json" onchange="importBackup(event)">
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="js/script.js"></script>
+</body>
+</html>
