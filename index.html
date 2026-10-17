@@ -27,9 +27,10 @@
       <div class="brand">
         <h1>Fin<span>track</span></h1>
         <span class="offline-badge" id="offlineBadge" hidden>offline</span>
+        <span class="save-status" id="saveStatus" hidden aria-live="polite"></span>
       </div>
       <div class="header-actions">
-        <button class="btn-config" onclick="openMenu()" title="Menu" aria-label="Abrir menu">
+        <button class="btn-config" data-action="open-menu" title="Menu" aria-label="Abrir menu">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7C8A82" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
         </button>
       </div>
@@ -43,8 +44,9 @@
 
       <div class="hero" id="hero">
         <div class="hero-toggle">
-          <button class="hero-toggle-btn active" id="toggleToday" onclick="setHeroView('today')">Hoje</button>
-          <button class="hero-toggle-btn" id="toggleAll" onclick="setHeroView('all')">Se pagar tudo</button>
+          <button class="hero-toggle-btn active" id="toggleToday" data-action="hero-view" data-view="today">Hoje</button>
+          <button class="hero-toggle-btn" id="toggleAll" data-action="hero-view" data-view="all">Projeção</button>
+          <button class="balance-toggle" id="toggleBalance" data-action="toggle-balance" aria-label="Ocultar saldos" aria-pressed="false">◌</button>
         </div>
 
         <div class="hero-balance zero" id="heroBalance">R$ 0,00</div>
@@ -77,16 +79,16 @@
       </div>
 
       <div class="tabs">
-        <button class="tab active" onclick="switchTab('all')"  id="tab-all">Todas</button>
-        <button class="tab"        onclick="switchTab('open')" id="tab-open">
+        <button class="tab active" data-action="switch-tab" data-tab="all" id="tab-all">Todas</button>
+        <button class="tab" data-action="switch-tab" data-tab="open" id="tab-open">
           Em aberto<span class="tab-badge" id="todayBadge" style="display:none"></span>
         </button>
-        <button class="tab"        onclick="switchTab('done')" id="tab-done">Pagas</button>
-        <button class="tab"        onclick="switchTab('in')"   id="tab-in">Entradas</button>
+        <button class="tab" data-action="switch-tab" data-tab="done" id="tab-done">Pagas</button>
+        <button class="tab" data-action="switch-tab" data-tab="in" id="tab-in">Entradas</button>
       </div>
 
       <div class="search-wrap">
-        <input type="search" id="searchInput" class="search-input" placeholder="Buscar por nome ou categoria..." oninput="onSearch()" aria-label="Buscar lançamento" autocomplete="off">
+        <input type="search" id="searchInput" class="search-input" placeholder="Buscar por nome ou categoria..." aria-label="Buscar lançamento" autocomplete="off">
       </div>
 
       <div class="list-wrap" id="listWrap"></div>
@@ -109,47 +111,46 @@
   </main>
 
   <div class="bottom-bar">
-    <button class="btn-add" onclick="openSheet()" aria-label="Adicionar lançamento">
+    <button class="btn-add" data-action="open-sheet" aria-label="Adicionar lançamento">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0D1A12" stroke-width="3" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       Adicionar
     </button>
   </div>
 
   <nav class="bottom-nav" aria-label="Navegação principal">
-    <button class="nav-btn active" data-view="home" onclick="switchView('home')" aria-label="Início">
+    <button class="nav-btn active" data-view="home" data-action="switch-view" aria-label="Início">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>
       <span>Início</span>
     </button>
-    <button class="nav-btn" data-view="calendar" onclick="switchView('calendar')" aria-label="Calendário">
+    <button class="nav-btn" data-view="calendar" data-action="switch-view" aria-label="Calendário">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="16" rx="2.5"/><path d="M3 9h18M8 2.5v4M16 2.5v4"/></svg>
       <span>Calendário</span>
     </button>
-    <button class="nav-btn" data-view="analysis" onclick="switchView('analysis')" aria-label="Análise">
+    <button class="nav-btn" data-view="analysis" data-action="switch-view" aria-label="Análise">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
       <span>Análise</span>
     </button>
-    <button class="nav-btn" data-view="plans" onclick="switchView('plans')" aria-label="Planos">
+    <button class="nav-btn" data-view="plans" data-action="switch-view" aria-label="Planos">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="0.6" fill="currentColor"/></svg>
       <span>Planos</span>
     </button>
   </nav>
 
-  <div class="overlay" id="overlay" onclick="closeOnBg(event)">
+  <div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
     <div class="sheet">
       <div class="sheet-handle"></div>
       <h2 id="sheetTitle">Nova entrada</h2>
 
       <div class="quickadd" id="quickAddBox">
-        <input type="text" id="quickAdd" placeholder="Rápido: mercado 150 ontem" autocomplete="off"
-               onkeydown="if(event.key==='Enter'){event.preventDefault();applyQuickAdd();}">
-        <button type="button" onclick="applyQuickAdd()" aria-label="Interpretar">↵</button>
+        <input type="text" id="quickAdd" placeholder="Rápido: mercado 150 ontem" autocomplete="off">
+        <button type="button" data-action="quick-add" aria-label="Interpretar">↵</button>
       </div>
 
       <div class="form-group">
         <label>Tipo</label>
         <div class="type-toggle">
-          <button class="type-btn active-expense" id="btnExpense" onclick="setType('expense')">💸 Despesa</button>
-          <button class="type-btn" id="btnIncome"  onclick="setType('income')">💰 Receita</button>
+          <button class="type-btn active-expense" id="btnExpense" data-action="set-type" data-type="expense">💸 Despesa</button>
+          <button class="type-btn" id="btnIncome" data-action="set-type" data-type="income">💰 Receita</button>
         </div>
       </div>
 
@@ -160,79 +161,79 @@
 
       <div class="form-group">
         <label>Nome</label>
-        <input type="text" id="fName" placeholder="ex: Aluguel, Mercado..." maxlength="30" oninput="suggestCategory()">
+        <input type="text" id="fName" placeholder="ex: Aluguel, Mercado..." maxlength="80">
       </div>
 
       <div class="form-group">
         <label>Categoria</label>
         <input type="hidden" id="fCategory" value="📦 Outros">
-        <button type="button" class="category-pill" id="categoryPill" onclick="toggleCategoryChips()">📦 Outros</button>
+        <button type="button" class="category-pill" id="categoryPill" data-action="toggle-categories">📦 Outros</button>
         <div class="category-chips" id="categoryChips" style="display:none"></div>
       </div>
 
-      <button type="button" class="date-toggle" id="dateToggle" onclick="showDateField()">📅 Adicionar vencimento</button>
+      <button type="button" class="date-toggle" id="dateToggle" data-action="show-date">📅 Adicionar vencimento</button>
       <div class="form-group" id="dateGroup" style="display:none">
         <label>Vencimento</label>
         <input type="date" id="fDate">
       </div>
 
-      <button type="button" class="recur-toggle" id="recurToggle" onclick="toggleRecurrence()" aria-pressed="false">
+      <button type="button" class="recur-toggle" id="recurToggle" data-action="toggle-recurrence" aria-pressed="false">
         <span class="recur-check" id="recurCheck">○</span> Repetir todo mês
       </button>
       <input type="hidden" id="fRecurrence" value="">
 
-      <button class="btn-toggle-paid btn-toggle-done" id="btnTogglePaid" style="display:none" onclick="togglePaidFromSheet()">✓ Marcar como paga</button>
-      <button class="btn-save" onclick="saveItem()">Salvar</button>
-      <button class="btn-duplicate" id="btnDuplicate" style="display:none" onclick="duplicateFromSheet()">📄 Duplicar lançamento</button>
-      <button class="btn-delete-full" id="btnDeleteFull" style="display:none" onclick="deleteFromSheet()">Excluir este item</button>
+      <button class="btn-toggle-paid btn-toggle-done" id="btnTogglePaid" style="display:none" data-action="toggle-paid-sheet">✓ Marcar como paga</button>
+      <button class="btn-save" data-action="save-item">Salvar</button>
+      <button class="btn-duplicate" id="btnDuplicate" style="display:none" data-action="duplicate-item">📄 Duplicar lançamento</button>
+      <button class="btn-delete-full" id="btnDeleteFull" style="display:none" data-action="delete-sheet">Excluir este item</button>
     </div>
   </div>
 
-  <div class="confirm-panel" id="confirmPanel" onclick="closeConfirmOnBg(event)">
+  <div class="confirm-panel" id="confirmPanel" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
     <div class="confirm-box">
       <div class="confirm-icon">⚠️</div>
-      <h3 class="confirm-title">Excluir item?</h3>
+      <h3 class="confirm-title" id="confirmTitle">Excluir item?</h3>
       <p class="confirm-text" id="confirmText">Tem certeza que deseja excluir este item?</p>
       <div class="confirm-actions">
-        <button class="btn-confirm-cancel" onclick="cancelDelete()">Cancelar</button>
-        <button class="btn-confirm-delete" onclick="confirmDelete()">Excluir</button>
+        <button class="btn-confirm-cancel" data-action="cancel-delete">Cancelar</button>
+        <button class="btn-confirm-delete" data-action="confirm-delete">Excluir</button>
       </div>
     </div>
   </div>
 
-  <div class="panel" id="depositSheet" onclick="closeDepositBg(event)">
+  <div class="panel" id="depositSheet" role="dialog" aria-modal="true">
     <div class="sheet" style="max-width:360px">
       <div class="sheet-handle"></div>
       <h2>Depositar na meta</h2>
       <div class="form-inline" style="margin-top:8px">
         <input type="text" id="depValue" inputmode="decimal" placeholder="Valor (R$)" />
         <div class="row" style="gap:8px;flex-wrap:wrap">
-          <button class="btn-mini ghost" onclick="quickDep(10);event.stopPropagation();">+R$ 10</button>
-          <button class="btn-mini ghost" onclick="quickDep(50);event.stopPropagation();">+R$ 50</button>
-          <button class="btn-mini ghost" onclick="quickDep(100);event.stopPropagation();">+R$ 100</button>
+          <button class="btn-mini ghost" data-action="quick-deposit" data-value="10">+R$ 10</button>
+          <button class="btn-mini ghost" data-action="quick-deposit" data-value="50">+R$ 50</button>
+          <button class="btn-mini ghost" data-action="quick-deposit" data-value="100">+R$ 100</button>
         </div>
         <div class="row">
-          <button class="btn ghost" onclick="closeDeposit();event.stopPropagation();">Cancelar</button>
-          <button class="btn primary" onclick="applyDeposit();event.stopPropagation();">Guardar</button>
+          <button class="btn ghost" data-action="close-deposit">Cancelar</button>
+          <button class="btn primary" data-action="apply-deposit">Guardar</button>
         </div>
       </div>
     </div>
   </div>
 
-  <div class="menu-panel" id="menuPanel" onclick="closeMenuOnBg(event)">
+  <div class="menu-panel" id="menuPanel" role="dialog" aria-modal="true">
     <div class="menu-sheet">
       <div class="sheet-handle"></div>
       <div class="menu-info" id="menuInfo"></div>
-      <button class="menu-item" onclick="exportBackup()">⬇️ Exportar backup (.json)</button>
-      <button class="menu-item" onclick="triggerImport()">⬆️ Importar backup</button>
-      <button class="menu-item" onclick="openSnapshots()">🕘 Histórico de versões</button>
-      <button class="menu-item" onclick="openSettings()">⚙️ Configurações</button>
-      <button class="menu-item danger" onclick="clearAll()">🗑️ Apagar tudo</button>
-      <input type="file" id="importFile" accept="application/json" onchange="importBackup(event)">
+      <button class="menu-item" data-action="export-backup">⬇️ Exportar backup (.json)</button>
+      <button class="menu-item" data-action="trigger-import">⬆️ Importar backup</button>
+      <button class="menu-item" data-action="open-snapshots">🕘 Histórico de versões</button>
+      <button class="menu-item" data-action="open-settings">⚙️ Configurações</button>
+      <button class="menu-item danger" data-action="clear-all">🗑️ Apagar tudo</button>
+      <input type="file" id="importFile" accept="application/json">
     </div>
   </div>
 
-  <div class="panel" id="snapshotPanel" onclick="closeOnBg2(event,'snapshotPanel')">
+  <div class="panel" id="snapshotPanel" role="dialog" aria-modal="true">
     <div class="sheet">
       <div class="sheet-handle"></div>
       <h2>Histórico de versões</h2>
@@ -241,30 +242,34 @@
     </div>
   </div>
 
-  <div class="panel" id="settingsPanel" onclick="closeOnBg2(event,'settingsPanel')">
+  <div class="panel" id="settingsPanel" role="dialog" aria-modal="true">
     <div class="sheet">
       <div class="sheet-handle"></div>
       <h2>Configurações</h2>
 
       <h3 class="settings-sec">Alertas</h3>
-      <label class="switch-row"><span>Contas vencendo</span><input type="checkbox" id="setDue" onchange="toggleAlert('due',this.checked)"></label>
-      <label class="switch-row"><span>Orçamento estourado</span><input type="checkbox" id="setBudget" onchange="toggleAlert('budget',this.checked)"></label>
-      <label class="switch-row"><span>Saldo previsto negativo</span><input type="checkbox" id="setCashflow" onchange="toggleAlert('cashflow',this.checked)"></label>
-      <label class="switch-row"><span>Também notificar no sistema</span><input type="checkbox" id="setNotification" onchange="toggleNotification(this.checked)"></label>
+      <label class="switch-row"><span>Contas vencendo</span><input type="checkbox" id="setDue" data-setting-alert="due"></label>
+      <label class="switch-row"><span>Orçamento estourado</span><input type="checkbox" id="setBudget" data-setting-alert="budget"></label>
+      <label class="switch-row"><span>Saldo previsto negativo</span><input type="checkbox" id="setCashflow" data-setting-alert="cashflow"></label>
+      <label class="switch-row"><span>Notificar enquanto o app estiver aberto</span><input type="checkbox" id="setNotification"></label>
 
       <h3 class="settings-sec">Aparência</h3>
-      <label class="switch-row"><span>Tema claro</span><input type="checkbox" id="setTheme" onchange="toggleTheme(this.checked)"></label>
+      <label class="switch-row"><span>Tema claro</span><input type="checkbox" id="setTheme"></label>
 
       <h3 class="settings-sec">Segurança</h3>
+      <p class="panel-hint">O PIN bloqueia a tela neste aparelho, mas não criptografa os dados armazenados.</p>
+      <div class="pin-row" id="pinCurrentWrap" hidden>
+        <input type="password" id="pinCurrent" inputmode="numeric" maxlength="6" placeholder="PIN atual" autocomplete="current-password">
+      </div>
       <div class="pin-row">
         <input type="password" id="pinNew" inputmode="numeric" maxlength="6" placeholder="PIN (4-6 dígitos)" autocomplete="off">
-        <button class="btn-mini" onclick="savePin()">Salvar</button>
-        <button class="btn-mini ghost" id="pinRemoveBtn" onclick="removePin()">Remover</button>
+        <button class="btn-mini" data-action="save-pin">Salvar</button>
+        <button class="btn-mini ghost" id="pinRemoveBtn" data-action="remove-pin">Remover</button>
       </div>
 
       <h3 class="settings-sec">Backup automático</h3>
       <p class="panel-hint">Ative para lembrar de exportar com frequência.</p>
-      <button class="btn-save" onclick="exportBackup();closeSettings();">Exportar agora</button>
+      <button class="btn-save" data-action="export-settings">Exportar agora</button>
     </div>
   </div>
 
@@ -272,20 +277,22 @@
     <div class="lock-box">
       <div class="lock-icon">🔒</div>
       <h2>Fintrack bloqueado</h2>
-      <input type="password" id="pinInput" inputmode="numeric" maxlength="6" placeholder="Digite o PIN" autocomplete="off"
-             onkeydown="if(event.key==='Enter'){event.preventDefault();tryUnlock();}">
-      <button class="btn-save" onclick="tryUnlock()">Desbloquear</button>
+      <input type="password" id="pinInput" inputmode="numeric" maxlength="6" placeholder="Digite o PIN" autocomplete="off">
+      <button class="btn-save" data-action="unlock">Desbloquear</button>
       <div class="lock-error" id="lockError"></div>
     </div>
   </div>
 
   <div class="snackbar" id="snackbar" role="status" aria-live="polite">
     <span id="snackbarMsg"></span>
-    <button class="snackbar-action" id="snackbarAction" style="display:none" onclick="runSnackbarAction()">Desfazer</button>
+    <button class="snackbar-action" id="snackbarAction" style="display:none" data-action="snackbar-action">Desfazer</button>
   </div>
 </div>
 </div>
 
+<script src="js/core.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/notifications.js"></script>
 <script src="js/script.js"></script>
 </body>
 </html>

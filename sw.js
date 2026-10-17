@@ -1,8 +1,11 @@
-const CACHE = 'fintrack-v3';
+const CACHE = 'fintrack-v4';
 const ASSETS = [
   './',
   './index.html',
   './css/style.css',
+  './js/core.js',
+  './js/storage.js',
+  './js/notifications.js',
   './js/script.js',
   './manifest.json',
   './icons/icon.svg'

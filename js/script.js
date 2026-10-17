@@ -5,10 +5,6 @@
    ═══════════════════════════════════════════════════════════ */
 
 /* ─── Constantes ─────────────────────────── */
-const DB_NAME = 'fintrack_db';
-const DB_VERSION = 1;
-const LS_KEY = 'fintrack_v1';
-const LS_SETTINGS = 'fintrack_settings_v1';
 const MAX_SNAPSHOTS = 20;
 const MONTHS = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
 const DOW = ['D','S','T','Q','Q','S','S'];
@@ -35,6 +31,11 @@ let viewMonth = currentMonthStr();
 let unlocked = true;
 let suggestionRefs = [];
 let alertRefs = [];
+let persistTimer = null;
+let persistPromise = Promise.resolve();
+const pendingPersist = new Map();
+let lockAttempts = 0;
+let lockedUntil = 0;
 
 function defaultSettings() {
   return {
@@ -47,6 +48,9 @@ function defaultSettings() {
     dismissed: {},
     spawned: {},
     pinHash: null,
+    pin: null,
+    balanceHidden: false,
+    dataVersion: FintrackCore.DATA_VERSION,
     theme: 'dark'
   };
 }
@@ -54,53 +58,27 @@ function defaultSettings() {
 /* ═══════════════════════════════════════════
    Persistência (IndexedDB com fallback)
    ═══════════════════════════════════════════ */
-function openDB() {
-  return new Promise((resolve, reject) => {
-    if (!('indexedDB' in window)) return reject(new Error('sem indexedDB'));
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const d = req.result;
-      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function idbGet(key) {
-  return new Promise((resolve, reject) => {
-    const r = db.transaction('kv', 'readonly').objectStore('kv').get(key);
-    r.onsuccess = () => resolve(r.result);
-    r.onerror = () => reject(r.error);
-  });
-}
-
-function idbSet(key, val) {
-  return new Promise((resolve, reject) => {
-    const r = db.transaction('kv', 'readwrite').objectStore('kv').put(val, key);
-    r.onsuccess = () => resolve();
-    r.onerror = () => reject(r.error);
-  });
-}
-
 async function loadData() {
-  try {
-    db = await openDB();
-    const [savedItems, savedSettings, savedSnaps] = await Promise.all([
-      idbGet('items'), idbGet('settings'), idbGet('snapshots')
-    ]);
-    if (Array.isArray(savedItems)) items = savedItems;
-    else migrateLocalStorage();
-    if (savedSettings && typeof savedSettings === 'object') {
-      settings = { ...defaultSettings(), ...savedSettings,
-        alerts: { ...defaultSettings().alerts, ...(savedSettings.alerts || {}) } };
-    }
-    if (Array.isArray(savedSnaps)) snapshots = savedSnaps;
-  } catch {
-    db = null;
-    migrateLocalStorage();
+  await FintrackStorage.init();
+  let [savedItems, savedSettings, savedSnaps] = await Promise.all([
+    FintrackStorage.get('items'), FintrackStorage.get('settings'), FintrackStorage.get('snapshots')
+  ]);
+  // Compatibilidade com as chaves antigas.
+  if (!Array.isArray(savedItems)) {
+    try { savedItems = JSON.parse(localStorage.getItem('fintrack_v1')); } catch {}
   }
+  if (!savedSettings) {
+    try { savedSettings = JSON.parse(localStorage.getItem('fintrack_settings_v1')); } catch {}
+  }
+  items = FintrackCore.migrateItems(savedItems || [], newId);
+  settings = FintrackCore.migrateSettings(savedSettings, defaultSettings);
+  snapshots = Array.isArray(savedSnaps) ? savedSnaps.slice(0, MAX_SNAPSHOTS).map(snapshot => ({
+    at: Number(snapshot.at) || Date.now(),
+    label: String(snapshot.label || 'Versão salva').slice(0, 80),
+    items: FintrackCore.migrateItems(snapshot.items || [], newId)
+  })) : [];
   migrateCategories();
+  await persistAll();
 }
 
 function migrateCategories() {
@@ -120,37 +98,71 @@ function migrateCategories() {
   if (changed) save();
 }
 
-function migrateLocalStorage() {
-  try { items = JSON.parse(localStorage.getItem(LS_KEY)) || []; } catch { items = []; }
-  try {
-    const s = JSON.parse(localStorage.getItem(LS_SETTINGS));
-    if (s) settings = { ...defaultSettings(), ...s, alerts: { ...defaultSettings().alerts, ...(s.alerts || {}) } };
-  } catch {}
-}
-
 function save() {
-  if (db) { idbSet('items', items).catch(() => {}); idbSet('settings', settings).catch(() => {}); }
-  try { localStorage.setItem(LS_KEY, JSON.stringify(items)); } catch {}
+  queuePersist([['items', items], ['settings', settings]]);
 }
 
 function saveSettings() {
-  if (db) idbSet('settings', settings).catch(() => {});
-  try { localStorage.setItem(LS_SETTINGS, JSON.stringify(settings)); } catch {}
+  queuePersist([['settings', settings]]);
 }
 
 function pushSnapshot(label) {
   snapshots.unshift({ at: Date.now(), label, items: JSON.parse(JSON.stringify(items)) });
   if (snapshots.length > MAX_SNAPSHOTS) snapshots.length = MAX_SNAPSHOTS;
-  if (db) idbSet('snapshots', snapshots).catch(() => {});
+  queuePersist([['snapshots', snapshots]]);
+}
+
+function setSaveStatus(state, message) {
+  const el = document.getElementById('saveStatus');
+  if (!el) return;
+  el.dataset.state = state;
+  el.textContent = message || (state === 'saving' ? 'salvando…' : state === 'error' ? 'não salvo' : 'salvo');
+  el.hidden = state === 'saved';
+}
+
+function queuePersist(entries) {
+  clearTimeout(persistTimer);
+  setSaveStatus('saving');
+  entries.forEach(([key, value]) => pendingPersist.set(key, JSON.parse(JSON.stringify(value))));
+  persistTimer = setTimeout(() => {
+    const snapshot = [...pendingPersist.entries()];
+    pendingPersist.clear();
+    persistPromise = persistPromise.then(async () => {
+      for (const [key, value] of snapshot) await FintrackStorage.set(key, value);
+      setSaveStatus('saved');
+    }).catch(error => {
+      console.error('Falha ao salvar dados', error);
+      setSaveStatus('error', 'erro ao salvar');
+      showSnackbar('Não foi possível salvar. Exporte um backup antes de fechar.', null, null, 8000);
+    });
+  }, 80);
+}
+
+async function persistAll() {
+  await Promise.all([
+    FintrackStorage.set('items', items),
+    FintrackStorage.set('settings', settings),
+    FintrackStorage.set('snapshots', snapshots)
+  ]).catch(error => {
+    console.error('Falha ao salvar dados', error);
+    setSaveStatus('error', 'erro ao salvar');
+  });
 }
 
 /* ═══════════════════════════════════════════
    Utilidades
    ═══════════════════════════════════════════ */
 function fmt(n) {
-  return 'R$ ' + Math.abs(n).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (settings.balanceHidden) return 'R$ ••••';
+  return 'R$ ' + Math.abs(FintrackCore.centsToAmount(n)).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtSigned(n) {
+  if (settings.balanceHidden) return 'R$ ••••';
+  return (n < 0 ? '−' : '') + fmt(n);
 }
 function fmtShort(n) {
+  if (settings.balanceHidden) return 'R$ ••••';
+  n = FintrackCore.centsToAmount(n);
   const a = Math.abs(n);
   if (a >= 1000) return (n < 0 ? '-' : '') + 'R$ ' + (a / 1000).toFixed(1).replace('.', ',') + 'k';
   return (n < 0 ? '-' : '') + 'R$ ' + a.toFixed(0);
@@ -165,12 +177,7 @@ function fmtDateFull(d) {
   const [, m, day] = d.split('-');
   return `${day} ${MONTHS[parseInt(m, 10) - 1].slice(0, 3)}`;
 }
-function localDateStr(d = new Date()) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
+const localDateStr = FintrackCore.localDateStr;
 function todayStr() { return localDateStr(); }
 function newId() {
   if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -184,7 +191,7 @@ function escapeHtml(s) {
 function normalize(str) {
   return String(str).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
-function sum(arr) { return arr.reduce((s, i) => s + i.value, 0); }
+function sum(arr) { return FintrackCore.sumCents(arr); }
 
 /* ─── Períodos ───────────────────────────── */
 function currentMonthStr() {
@@ -287,12 +294,13 @@ function markInvalid(input, msg) {
 function calcTotals() {
   const expenses = items.filter(i => i.type === 'expense');
   const income = items.filter(i => i.type === 'income');
-  const totalI = sum(income);
+  const balances = FintrackCore.calculateBalances(items, todayStr());
+  const totalI = balances.availableIncome;
   const paidE = sum(expenses.filter(i => i.paid));
   const pendingE = sum(expenses.filter(i => !i.paid));
 
-  heroBalances.today = totalI - paidE;
-  heroBalances.all = totalI - (paidE + pendingE);
+  heroBalances.today = balances.currentCents;
+  heroBalances.all = balances.projectedCents;
   updateHeroDisplay();
 
   document.getElementById('totalExpense').textContent = fmt(pendingE);
@@ -314,10 +322,10 @@ function calcTotals() {
 function updateHeroDisplay() {
   const value = heroView === 'today' ? heroBalances.today : heroBalances.all;
   const el = document.getElementById('heroBalance');
-  el.textContent = fmt(value);
+  el.textContent = fmtSigned(value);
   el.className = 'hero-balance ' + (value > 0 ? 'positive' : value < 0 ? 'negative' : 'zero');
   document.getElementById('heroSublabel').textContent =
-    heroView === 'today' ? 'após contas já pagas' : 'incluindo pendentes';
+    heroView === 'today' ? 'disponível hoje' : 'incluindo entradas e contas futuras';
 }
 
 function setHeroView(view) {
@@ -325,6 +333,21 @@ function setHeroView(view) {
   document.getElementById('toggleToday').classList.toggle('active', view === 'today');
   document.getElementById('toggleAll').classList.toggle('active', view === 'all');
   updateHeroDisplay();
+}
+
+function toggleBalanceVisibility() {
+  settings.balanceHidden = !settings.balanceHidden;
+  saveSettings();
+  updateBalanceToggle();
+  render();
+}
+
+function updateBalanceToggle() {
+  const button = document.getElementById('toggleBalance');
+  if (!button) return;
+  button.setAttribute('aria-pressed', settings.balanceHidden ? 'true' : 'false');
+  button.setAttribute('aria-label', settings.balanceHidden ? 'Mostrar saldos' : 'Ocultar saldos');
+  button.textContent = settings.balanceHidden ? '◉' : '◌';
 }
 
 function renderTodayBadge() {
@@ -442,7 +465,7 @@ function renderItem(it, isToday) {
   const paidClass = it.paid ? 'paid' : '';
 
   return `
-    <div class="item ${paidClass} ${urgencyClass} ${todayClass}" id="item-${idAttr}" onclick="openSheet('${idAttr}')">
+    <div class="item ${paidClass} ${urgencyClass} ${todayClass}" id="item-${idAttr}" data-action="open-sheet" data-id="${idAttr}">
       <div class="item-icon" style="background:${isExpense ? 'var(--red-dim)' : 'var(--green-dim)'}">${icon}</div>
       <div class="item-info">
         <div class="item-name">${escapeHtml(it.name)}</div>
@@ -453,14 +476,13 @@ function renderItem(it, isToday) {
         </div>
       </div>
       <div class="item-right">
-        <div class="item-value ${isExpense ? 'red' : 'green'}">${isExpense ? '−' : '+'}${fmt(it.value)}</div>
+        <div class="item-value ${isExpense ? 'red' : 'green'}">${isExpense ? '−' : '+'}${fmt(it.valueCents)}</div>
         <div class="item-actions">
           ${isExpense ? `
-            <button class="btn-action btn-done ${it.paid ? 'btn-done-active' : ''}"
-              onclick="event.stopPropagation(); togglePaid('${idAttr}')"
+            <button class="btn-action btn-done ${it.paid ? 'btn-done-active' : ''}" data-action="toggle-paid" data-id="${idAttr}"
               title="${it.paid ? 'Desmarcar' : 'Marcar paga'}"
               aria-label="${it.paid ? 'Desmarcar pagamento' : 'Marcar como paga'}">${it.paid ? '✓' : '○'}</button>` : ''}
-          <button class="btn-action btn-del" onclick="event.stopPropagation(); deleteItem('${idAttr}')" title="Excluir" aria-label="Excluir">✕</button>
+          <button class="btn-action btn-del" data-action="delete-item" data-id="${idAttr}" title="Excluir" aria-label="Excluir">✕</button>
         </div>
       </div>
     </div>`;
@@ -593,7 +615,7 @@ function digitsToCurrency(digits) {
   intPart = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
   return `R$ ${intPart},${cents}`;
 }
-function currencyToNumber(digits) { return digits ? parseInt(digits, 10) / 100 : 0; }
+function currencyToCents(digits) { return digits ? parseInt(digits, 10) : 0; }
 
 function setupCurrencyMask(input) {
   input.addEventListener('input', () => {
@@ -605,27 +627,15 @@ function setupCurrencyMask(input) {
     setTimeout(() => input.setSelectionRange(input.value.length, input.value.length), 0);
   });
 }
-function getValueNumber() { return currencyToNumber(document.getElementById('fValue').dataset.raw || ''); }
-function setValueDisplay(num) {
+function getValueCents() { return currencyToCents(document.getElementById('fValue').dataset.raw || ''); }
+function setValueDisplay(cents) {
   const input = document.getElementById('fValue');
-  const digits = Math.round((num || 0) * 100).toString();
+  const digits = Math.max(0, Math.round(cents || 0)).toString();
   input.dataset.raw = digits;
   input.value = digitsToCurrency(digits);
 }
 function parseMoney(str) {
-  if (str == null) return 0;
-  let s = String(str).replace(/[^\d.,]/g, '');
-  if (!s) return 0;
-  const hasComma = s.includes(','), hasDot = s.includes('.');
-  if (hasComma && hasDot) {
-    s = s.replace(/\./g, '').replace(',', '.');
-  } else if (hasComma) {
-    s = s.replace(',', '.');
-  } else if (hasDot) {
-    const after = s.split('.').pop();
-    if (after.length === 3 && s.length > 4) s = s.replace(/\./g, '');
-  }
-  return parseFloat(s) || 0;
+  return FintrackCore.parseMoneyToCents(str);
 }
 
 /* ═══════════════════════════════════════════
@@ -806,7 +816,7 @@ function learnCategory(name, cat) {
 function renderChips() {
   const cats = categoriesFor(currentType);
   document.getElementById('categoryChips').innerHTML = cats.map(cat =>
-    `<button type="button" class="chip" data-cat="${cat}" onclick="setCategory('${cat}', true); document.getElementById('categoryChips').style.display='none';">${cat}</button>`
+    `<button type="button" class="chip" data-action="set-category" data-cat="${escapeHtml(cat)}">${escapeHtml(cat)}</button>`
   ).join('');
   const cur = document.getElementById('fCategory').value;
   document.querySelectorAll('.chip').forEach(c => c.classList.toggle('active', c.dataset.cat === cur));
@@ -928,7 +938,7 @@ function openSheet(id) {
     if (!it) return;
     document.getElementById('sheetTitle').textContent = 'Editar lançamento';
     document.getElementById('fName').value = it.name;
-    setValueDisplay(it.value);
+    setValueDisplay(it.valueCents);
     document.getElementById('fDate').value = it.date || '';
     setCategory(it.category, true);
     setType(it.type);
@@ -989,13 +999,14 @@ function setType(type) {
 
 function saveItem() {
   const name = document.getElementById('fName').value.trim();
-  const value = getValueNumber();
+  const valueCents = getValueCents();
   const date = document.getElementById('fDate').value;
   const cat = document.getElementById('fCategory').value;
   const recur = document.getElementById('fRecurrence').value || null;
 
   if (!name) { markInvalid(document.getElementById('fName'), 'Informe um nome'); return; }
-  if (!value || value <= 0) { markInvalid(document.getElementById('fValue'), 'Informe um valor'); return; }
+  if (!valueCents || valueCents <= 0) { markInvalid(document.getElementById('fValue'), 'Informe um valor'); return; }
+  if (!FintrackCore.isValidDate(date)) { markInvalid(document.getElementById('fDate'), 'Informe uma data válida'); return; }
 
   // Aprendizado: guarda a categoria escolhida (nome + palavras-chave)
   const guess = guessCategory(name, currentType);
@@ -1006,10 +1017,10 @@ function saveItem() {
 
   if (editId) {
     const it = items.find(i => i.id === editId);
-    if (it) { it.name = name; it.value = value; it.date = date; it.category = cat; it.type = currentType; it.recurrence = recur; }
+    if (it) { it.name = name; it.valueCents = valueCents; it.date = date; it.category = cat; it.type = currentType; it.recurrence = recur; }
     toast('Lançamento atualizado');
   } else {
-    items.unshift({ id: newId(), name, value, date, category: cat, type: currentType, paid: false, recurrence: recur, createdAt: Date.now() });
+    items.unshift({ id: newId(), name, valueCents, date, category: cat, type: currentType, paid: false, recurrence: recur, createdAt: Date.now() });
     toast('Lançamento salvo');
   }
   save(); closeSheet(); render();
@@ -1065,17 +1076,17 @@ function renderCalendar() {
     if (!inMonth(i.date, viewMonth)) return;
     const s = dayStats[i.date];
     if (!s) return;
-    if (i.type === 'expense') { s.spent += i.value; i.paid ? (s.hasPaid = true) : (s.hasOpen = true); }
-    else { s.income += i.value; }
+    if (i.type === 'expense') { s.spent += i.valueCents; i.paid ? (s.hasPaid = true) : (s.hasOpen = true); }
+    else { s.income += i.valueCents; }
   });
 
   const maxSpent = Math.max(1, ...Object.values(dayStats).map(s => s.spent));
 
   const header = `
     <div class="month-nav">
-      <button onclick="changeMonth(-1)" aria-label="Mês anterior">‹</button>
+      <button data-action="change-month" data-delta="-1" aria-label="Mês anterior">‹</button>
       <div class="month-nav-label">${monthLabel(viewMonth)}</div>
-      <button onclick="changeMonth(1)" aria-label="Próximo mês">›</button>
+      <button data-action="change-month" data-delta="1" aria-label="Próximo mês">›</button>
     </div>`;
 
   const monthExp = items.filter(i => i.type === 'expense' && inMonth(i.date, viewMonth));
@@ -1095,9 +1106,9 @@ function renderCalendar() {
     const dot = s.hasOpen ? '<span class="cal-dot open"></span>'
       : s.hasPaid ? '<span class="cal-dot paid"></span>'
       : s.income > 0 ? '<span class="cal-dot dot-today"></span>' : '';
-    grid += `<div class="cal-cell ${ds === today ? 'today' : ''}" onclick="showDay('${ds}')" title="${s.spent > 0 ? fmt(s.spent) : ''}">
+    grid += `<button class="cal-cell ${ds === today ? 'today' : ''}" data-action="show-day" data-date="${ds}" title="${s.spent > 0 ? fmt(s.spent) : ''}">
       ${heat}<span class="cal-daynum">${d}</span>${dot}
-    </div>`;
+    </button>`;
   }
   grid += '</div>';
 
@@ -1146,27 +1157,18 @@ function monthIncome(ym) { return items.filter(i => i.type === 'income' && inMon
 
 function categoryTotals(ym) {
   const map = {};
-  monthExpenses(ym).forEach(i => { map[i.category || '📦 Outros'] = (map[i.category || '📦 Outros'] || 0) + i.value; });
+  monthExpenses(ym).forEach(i => { map[i.category || '📦 Outros'] = (map[i.category || '📦 Outros'] || 0) + i.valueCents; });
   return Object.entries(map).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
 }
 
 function cashFlow() {
-  const income = sum(items.filter(i => i.type === 'income'));
-  const paidE = sum(items.filter(i => i.type === 'expense' && i.paid));
-  const balanceNow = income - paidE;
-
-  const events = items
-    .filter(i => i.type === 'expense' && !i.paid && i.date)
-    .map(i => ({ date: i.date, value: i.value }))
-    .sort((a, b) => a.date.localeCompare(b.date));
-
-  let bal = balanceNow, negativeDate = null, lastCovered = null;
-  for (const e of events) {
-    if (bal >= 0 && lastCovered === null) lastCovered = e.date;
-    bal -= e.value;
-    if (bal < 0 && negativeDate === null) negativeDate = e.date;
-  }
-  return { balanceNow, endBalance: bal, negativeDate, lastCovered, events };
+  const result = FintrackCore.calculateCashFlow(items, todayStr());
+  return {
+    balanceNow: result.balanceNowCents,
+    endBalance: result.endBalanceCents,
+    negativeDate: result.negativeDate,
+    events: result.events
+  };
 }
 
 function donutSVG(segs) {
@@ -1191,7 +1193,7 @@ function cashflowSVG(cf) {
   const dayNum = d => Math.round((new Date(d + 'T00:00:00') - new Date(today + 'T00:00:00')) / 86400000);
   const pts = [{ x: 0, y: cf.balanceNow }];
   let bal = cf.balanceNow;
-  for (const e of cf.events) { bal -= e.value; pts.push({ x: Math.max(0, dayNum(e.date)), y: bal }); }
+  for (const e of cf.events) { bal += e.valueCents; pts.push({ x: Math.max(0, dayNum(e.date)), y: bal }); }
   if (pts.length < 2) return '';
 
   const W = 300, H = 110, pad = 8;
@@ -1244,9 +1246,9 @@ function renderAnalysis() {
 
   const header = `
     <div class="month-nav">
-      <button onclick="changeMonth(-1)" aria-label="Mês anterior">‹</button>
+      <button data-action="change-month" data-delta="-1" aria-label="Mês anterior">‹</button>
       <div class="month-nav-label">${monthLabel(viewMonth)}</div>
-      <button onclick="changeMonth(1)" aria-label="Próximo mês">›</button>
+      <button data-action="change-month" data-delta="1" aria-label="Próximo mês">›</button>
     </div>`;
 
   const legend = colored.map(c =>
@@ -1256,11 +1258,11 @@ function renderAnalysis() {
   let forecastHtml;
   if (cf.negativeDate) {
     forecastHtml = `
-      <div class="forecast-big neg">${fmt(cf.endBalance)}</div>
+      <div class="forecast-big neg">${fmtSigned(cf.endBalance)}</div>
       <div class="forecast-desc">Seu saldo fica <b style="color:var(--red)">negativo em ${fmtDate(cf.negativeDate)}</b>. Faltam ${fmt(Math.abs(cf.endBalance))} para cobrir tudo.</div>`;
   } else {
     forecastHtml = `
-      <div class="forecast-big pos">${fmt(cf.endBalance)}</div>
+      <div class="forecast-big pos">${fmtSigned(cf.endBalance)}</div>
       <div class="forecast-desc">Seu saldo atual (${fmt(cf.balanceNow)}) cobre todas as contas em aberto.</div>`;
   }
 
@@ -1271,8 +1273,8 @@ function renderAnalysis() {
     ? suggestions.map((s, i) => `
         <div class="alert-item info" style="align-items:center">
           <span style="flex:1">🔁 "<b>${escapeHtml(s.name)}</b>" aparece em ${s.count} meses. Tornar recorrente?</span>
-          <button onclick="acceptRecurrence(${i})" style="opacity:1;font-size:12px;font-weight:700">Sim</button>
-          <button onclick="dismissSuggestion(${i})" aria-label="Dispensar">✕</button>
+          <button data-action="accept-recurrence" data-index="${i}" style="opacity:1;font-size:12px;font-weight:700">Sim</button>
+          <button data-action="dismiss-suggestion" data-index="${i}" aria-label="Dispensar">✕</button>
         </div>`).join('')
     : '';
 
@@ -1395,7 +1397,7 @@ function renderPlans() {
     if (!limit && !spent) return '';
     const pct = limit ? Math.min(100, Math.round(spent / limit * 100)) : (spent ? 100 : 0);
     const cls = limit && spent > limit ? 'over' : pct >= 80 ? 'warn' : '';
-    const inputVal = settings.budgets[cat] ? String(settings.budgets[cat]).replace('.', ',') : '';
+    const inputVal = settings.budgets[cat] ? FintrackCore.centsToAmount(settings.budgets[cat]).toFixed(2).replace('.', ',') : '';
     const remain = limit - spent;
     return `
       <div class="budget-row">
@@ -1407,8 +1409,8 @@ function renderPlans() {
         <div class="budget-head">
           <div class="budget-input-wrap">
             <span>Limite R$</span>
-            <input class="budget-input" inputmode="decimal" value="${escapeHtml(inputVal)}" placeholder="0,00"
-                   onchange="setBudget('${cat}', this.value)" aria-label="Limite para ${cat}">
+             <input class="budget-input" inputmode="decimal" value="${escapeHtml(inputVal)}" placeholder="0,00"
+                   data-budget-cat="${escapeHtml(cat)}" aria-label="Limite para ${escapeHtml(cat)}">
           </div>
           ${limit ? `<span class="budget-vals" style="color:${remain < 0 ? 'var(--red)' : 'var(--green)'}">${remain < 0 ? 'estourou ' + fmt(-remain) : 'resta ' + fmt(remain)}</span>` : ''}
         </div>
@@ -1416,21 +1418,21 @@ function renderPlans() {
   }).join('');
 
   const goals = settings.goals.map(g => {
-    const pct = g.target ? Math.min(100, Math.round(g.saved / g.target * 100)) : 0;
-    const remain = Math.max(0, g.target - g.saved);
+    const pct = g.targetCents ? Math.min(100, Math.round(g.savedCents / g.targetCents * 100)) : 0;
+    const remain = Math.max(0, g.targetCents - g.savedCents);
     return `
       <div class="goal-card">
         <div class="goal-head">
           <span class="goal-name">${escapeHtml(g.name)}</span>
-          <button class="goal-del" onclick="deleteGoal('${g.id}')" aria-label="Excluir meta">✕</button>
+          <button class="goal-del" data-action="delete-goal" data-id="${escapeHtml(g.id)}" aria-label="Excluir meta">✕</button>
         </div>
         <div class="goal-bar"><div class="goal-fill" style="width:${pct}%;${pct >= 100 ? 'background:var(--green)' : ''}"></div></div>
         <div class="goal-meta">
-          <span>${fmt(g.saved)} de ${fmt(g.target)}</span>
+          <span>${fmt(g.savedCents)} de ${fmt(g.targetCents)}</span>
           <span>${pct >= 100 ? '🎉 meta atingida' : 'faltam ' + fmt(remain)}</span>
         </div>
         <div class="goal-actions">
-          <button class="btn-mini" onclick="depositGoal('${g.id}');event.stopPropagation()">＋ Guardar</button>
+          <button class="btn-mini" data-action="deposit-goal" data-id="${escapeHtml(g.id)}">＋ Guardar</button>
           ${g.deadline ? `<button class="btn-mini ghost">até ${fmtDateFull(g.deadline)}</button>` : ''}
         </div>
       </div>`;
@@ -1441,7 +1443,7 @@ function renderPlans() {
       <div class="card-title"><span>Orçamento por categoria</span>
         <label class="card-sub" style="display:flex;align-items:center;gap:6px">
           rollover
-          <input type="checkbox" ${settings.budgetRollover ? 'checked' : ''} onchange="toggleRollover(this.checked)" style="width:34px;height:20px">
+          <input type="checkbox" id="budgetRollover" ${settings.budgetRollover ? 'checked' : ''} style="width:34px;height:20px">
         </label>
       </div>
       ${rows || '<div class="empty-mini">Defina limites para acompanhar seus gastos por categoria.</div>'}
@@ -1456,7 +1458,7 @@ function renderPlans() {
           <input type="text" id="goalTarget" inputmode="decimal" placeholder="Valor alvo (R$)">
           <input type="date" id="goalDeadline" aria-label="Prazo">
         </div>
-        <button class="btn-mini" onclick="addGoal()">＋ Criar meta</button>
+        <button class="btn-mini" data-action="add-goal">＋ Criar meta</button>
       </div>
     </div>`;
 }
@@ -1472,11 +1474,11 @@ function toggleRollover(on) { settings.budgetRollover = !!on; saveSettings(); re
 
 function addGoal() {
   const name = document.getElementById('goalName').value.trim();
-  const target = parseMoney(document.getElementById('goalTarget').value);
+  const targetCents = parseMoney(document.getElementById('goalTarget').value);
   const deadline = document.getElementById('goalDeadline').value || null;
   if (!name) { markInvalid(document.getElementById('goalName'), 'Informe o nome da meta'); return; }
-  if (target <= 0) { markInvalid(document.getElementById('goalTarget'), 'Informe um valor alvo'); return; }
-  settings.goals.push({ id: newId(), name, target, saved: 0, deadline });
+  if (targetCents <= 0) { markInvalid(document.getElementById('goalTarget'), 'Informe um valor alvo'); return; }
+  settings.goals.push({ id: newId(), name, targetCents, savedCents: 0, deadline });
   saveSettings(); renderPlans();
   toast('Meta criada 🎯');
 }
@@ -1502,8 +1504,8 @@ function applyDeposit() {
   if (!depGoalId) return;
   const g = settings.goals.find(x => x.id === depGoalId);
   if (!g) return;
-  const num = parseMoney(document.getElementById('depValue').value);
-  if (num > 0) { g.saved += num; saveSettings(); renderPlans(); toast('Guardado ' + fmt(num)); }
+  const cents = parseMoney(document.getElementById('depValue').value);
+  if (cents > 0) { g.savedCents += cents; saveSettings(); renderPlans(); toast('Guardado ' + fmt(cents)); }
   closeDeposit();
 }
 function depositGoal(id) { openDeposit(id); }
@@ -1544,12 +1546,14 @@ function computeAlerts() {
 
 function renderAlerts() {
   const el = document.getElementById('alertsBanner');
-  const alerts = computeAlerts().slice(0, 3);
+  const allAlerts = computeAlerts();
+  const alerts = allAlerts.slice(0, 3);
   alertRefs = alerts;
+  FintrackNotifications.notify(allAlerts, settings.notification);
   if (!alerts.length) { el.style.display = 'none'; return; }
   el.style.display = 'flex';
   el.innerHTML = alerts.map((a, i) =>
-    `<div class="alert-item ${a.type}"><span style="flex:1">${a.text}</span><button onclick="dismissAlert(${i})" aria-label="Dispensar">✕</button></div>`
+    `<div class="alert-item ${a.type}"><span style="flex:1">${a.text}</span><button data-action="dismiss-alert" data-index="${i}" aria-label="Dispensar">✕</button></div>`
   ).join('');
 }
 
@@ -1585,7 +1589,7 @@ function openSnapshots() {
           <div class="snap-label">${escapeHtml(s.label)}</div>
           <div class="snap-date">${new Date(s.at).toLocaleString('pt-BR')} · ${s.items.length} lançamento(s)</div>
         </div>
-        <button class="btn-mini" onclick="restoreSnapshot(${i})">Restaurar</button>
+        <button class="btn-mini" data-action="restore-snapshot" data-index="${i}">Restaurar</button>
       </div>`).join('');
   }
   openPanel('snapshotPanel');
@@ -1596,7 +1600,7 @@ function restoreSnapshot(i) {
   if (!s) return;
   if (!confirm(`Restaurar a versão "${s.label}"? Os dados atuais serão substituídos.`)) return;
   pushSnapshot('Antes de restaurar');
-  items = JSON.parse(JSON.stringify(s.items));
+  items = FintrackCore.migrateItems(s.items, newId);
   save(); closePanel('snapshotPanel'); render();
   toast('Versão restaurada');
 }
@@ -1608,7 +1612,9 @@ function openSettings() {
   document.getElementById('setCashflow').checked = !!settings.alerts.cashflow;
   document.getElementById('setNotification').checked = !!settings.notification;
   document.getElementById('setTheme').checked = settings.theme === 'light';
-  document.getElementById('pinRemoveBtn').style.display = settings.pinHash ? 'inline-block' : 'none';
+  const hasPin = !!(settings.pin || settings.pinHash);
+  document.getElementById('pinRemoveBtn').style.display = hasPin ? 'inline-block' : 'none';
+  document.getElementById('pinCurrentWrap').hidden = !hasPin;
   openPanel('settingsPanel');
 }
 function closeSettings() { closePanel('settingsPanel'); }
@@ -1616,11 +1622,18 @@ function closeSettings() { closePanel('settingsPanel'); }
 function toggleAlert(key, val) { settings.alerts[key] = !!val; saveSettings(); renderAlerts(); }
 
 function toggleNotification(val) {
-  settings.notification = !!val;
-  if (val && 'Notification' in window && Notification.permission === 'default') {
-    Notification.requestPermission();
+  if (!val) {
+    settings.notification = false;
+    saveSettings();
+    return;
   }
-  saveSettings();
+  FintrackNotifications.requestPermission().then(permission => {
+    settings.notification = permission === 'granted';
+    document.getElementById('setNotification').checked = settings.notification;
+    saveSettings();
+    if (!settings.notification) toast(permission === 'unsupported' ? 'Notificações não são compatíveis com este navegador' : 'Permissão de notificação não concedida');
+    else { toast('Notificações ativadas'); renderAlerts(); }
+  });
 }
 
 function toggleTheme(val) {
@@ -1631,52 +1644,106 @@ function toggleTheme(val) {
 function applyTheme() { document.documentElement.classList.toggle('light', settings.theme === 'light'); }
 
 /* ─── PIN ────────────────────────────────── */
-async function hashPin(pin) {
-  const s = 'fintrack:' + pin;
-  if (window.crypto && crypto.subtle) {
-    try {
-      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
-      return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
-    } catch {}
-  }
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-  return 'x' + (h >>> 0).toString(16);
+function bytesToHex(bytes) {
+  return [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function randomHex(size = 16) {
+  const bytes = new Uint8Array(size);
+  crypto.getRandomValues(bytes);
+  return bytesToHex(bytes);
+}
+
+async function derivePin(pin, salt, iterations = 210000) {
+  if (!crypto?.subtle) throw new Error('Criptografia segura indisponível');
+  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: new TextEncoder().encode(salt), iterations }, material, 256);
+  return bytesToHex(new Uint8Array(bits));
+}
+
+async function legacyHashPin(pin) {
+  const value = 'fintrack:' + pin;
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return bytesToHex(new Uint8Array(buf));
+}
+
+function legacyWeakHashPin(pin) {
+  const value = 'fintrack:' + pin;
+  let hash = 5381;
+  for (let i = 0; i < value.length; i++) hash = ((hash << 5) + hash + value.charCodeAt(i)) | 0;
+  return 'x' + (hash >>> 0).toString(16);
+}
+
+async function verifyPin(pin) {
+  if (settings.pin) return (await derivePin(pin, settings.pin.salt, settings.pin.iterations)) === settings.pin.hash;
+  if (settings.pinHash?.startsWith('x')) return legacyWeakHashPin(pin) === settings.pinHash;
+  if (settings.pinHash && crypto?.subtle) return (await legacyHashPin(pin)) === settings.pinHash;
+  return false;
 }
 
 async function savePin() {
   const pin = document.getElementById('pinNew').value.trim();
   if (!/^\d{4,6}$/.test(pin)) { showSnackbar('PIN deve ter de 4 a 6 dígitos', null, null, 2500); return; }
-  settings.pinHash = await hashPin(pin);
-  saveSettings();
-  document.getElementById('pinNew').value = '';
-  document.getElementById('pinRemoveBtn').style.display = 'inline-block';
-  toast('PIN definido 🔒');
+  try {
+    if (settings.pin || settings.pinHash) {
+      const current = document.getElementById('pinCurrent').value.trim();
+      if (!(await verifyPin(current))) { markInvalid(document.getElementById('pinCurrent'), 'PIN atual incorreto'); return; }
+    }
+    const salt = randomHex();
+    settings.pin = { salt, iterations: 210000, hash: await derivePin(pin, salt, 210000) };
+    settings.pinHash = null;
+    saveSettings();
+    document.getElementById('pinNew').value = '';
+    document.getElementById('pinCurrent').value = '';
+    document.getElementById('pinRemoveBtn').style.display = 'inline-block';
+    document.getElementById('pinCurrentWrap').hidden = false;
+    toast('Bloqueio de privacidade definido 🔒');
+  } catch { toast('Este navegador não oferece criptografia segura para o PIN'); }
 }
 
-function removePin() {
+async function removePin() {
+  const current = document.getElementById('pinCurrent').value.trim();
+  if (!(await verifyPin(current))) { markInvalid(document.getElementById('pinCurrent'), 'Informe o PIN atual para remover'); return; }
+  settings.pin = null;
   settings.pinHash = null;
   saveSettings();
+  document.getElementById('pinCurrent').value = '';
   document.getElementById('pinRemoveBtn').style.display = 'none';
+  document.getElementById('pinCurrentWrap').hidden = true;
   toast('PIN removido');
 }
 
 async function tryUnlock() {
+  if (Date.now() < lockedUntil) {
+    const seconds = Math.ceil((lockedUntil - Date.now()) / 1000);
+    document.getElementById('lockError').textContent = `Aguarde ${seconds}s para tentar novamente.`;
+    return;
+  }
   const pin = document.getElementById('pinInput').value.trim();
-  const h = await hashPin(pin);
-  if (h === settings.pinHash) {
+  if (await verifyPin(pin)) {
+    if (!settings.pin && settings.pinHash && crypto?.subtle) {
+      const salt = randomHex();
+      settings.pin = { salt, iterations: 210000, hash: await derivePin(pin, salt, 210000) };
+      settings.pinHash = null;
+      saveSettings();
+    }
     unlocked = true;
+    lockAttempts = 0;
     document.getElementById('lockScreen').hidden = true;
     document.getElementById('pinInput').value = '';
     document.getElementById('lockError').textContent = '';
   } else {
-    document.getElementById('lockError').textContent = 'PIN incorreto.';
+    lockAttempts++;
+    if (lockAttempts >= 5) {
+      lockedUntil = Date.now() + Math.min(300000, 30000 * Math.pow(2, Math.floor((lockAttempts - 5) / 2)));
+      document.getElementById('lockError').textContent = 'Muitas tentativas. Aguarde 30 segundos.';
+    } else document.getElementById('lockError').textContent = `PIN incorreto. Restam ${5 - lockAttempts} tentativa(s).`;
     document.getElementById('pinInput').value = '';
   }
 }
 
 function applyLock() {
-  if (settings.pinHash) {
+  if (settings.pin || settings.pinHash) {
     unlocked = false;
     document.getElementById('lockScreen').hidden = false;
     setTimeout(() => document.getElementById('pinInput').focus(), 200);
@@ -1689,7 +1756,8 @@ function applyLock() {
    Backup
    ═══════════════════════════════════════════ */
 function exportBackup() {
-  const blob = new Blob([JSON.stringify(items, null, 2)], { type: 'application/json' });
+  const backup = FintrackCore.createBackup(items, settings, snapshots);
+  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -1709,13 +1777,14 @@ function importBackup(e) {
   const reader = new FileReader();
   reader.onload = () => {
     try {
-      const data = JSON.parse(reader.result);
-      if (!Array.isArray(data)) throw new Error('formato inválido');
-      if (confirm(`Importar ${data.length} lançamentos? Isso substitui os dados atuais.`)) {
+      const data = FintrackCore.parseBackup(reader.result, defaultSettings, newId);
+      if (confirm(`Importar ${data.items.length} lançamentos? Isso substitui os dados atuais.`)) {
         pushSnapshot('Antes de importar');
-        items = data;
-        save(); render(); closeMenu();
-        toast('Backup importado');
+        items = data.items;
+        if (data.settings) settings = data.settings;
+        if (data.snapshots.length) snapshots = data.snapshots;
+        save(); queuePersist([['snapshots', snapshots]]); applyTheme(); updateBalanceToggle(); render(); closeMenu();
+        toast(data.legacy ? 'Backup antigo importado e atualizado' : 'Backup importado');
       }
     } catch {
       showSnackbar('Arquivo inválido. Use um backup do Fintrack.', null, null, 4000);
@@ -1728,9 +1797,98 @@ function importBackup(e) {
 /* ═══════════════════════════════════════════
    Boot
    ═══════════════════════════════════════════ */
+function setupEvents() {
+  const actions = {
+    'open-menu': () => openMenu(),
+    'hero-view': el => setHeroView(el.dataset.view),
+    'toggle-balance': () => toggleBalanceVisibility(),
+    'switch-tab': el => switchTab(el.dataset.tab),
+    'open-sheet': el => openSheet(el.dataset.id),
+    'switch-view': el => switchView(el.dataset.view),
+    'quick-add': () => applyQuickAdd(),
+    'set-type': el => setType(el.dataset.type),
+    'toggle-categories': () => toggleCategoryChips(),
+    'set-category': el => { setCategory(el.dataset.cat, true); document.getElementById('categoryChips').style.display = 'none'; },
+    'show-date': () => showDateField(),
+    'toggle-recurrence': () => toggleRecurrence(),
+    'toggle-paid-sheet': () => togglePaidFromSheet(),
+    'save-item': () => saveItem(),
+    'duplicate-item': () => duplicateFromSheet(),
+    'delete-sheet': () => deleteFromSheet(),
+    'toggle-paid': el => togglePaid(el.dataset.id),
+    'delete-item': el => deleteItem(el.dataset.id),
+    'cancel-delete': () => cancelDelete(),
+    'confirm-delete': () => confirmDelete(),
+    'quick-deposit': el => quickDep(Number(el.dataset.value)),
+    'close-deposit': () => closeDeposit(),
+    'apply-deposit': () => applyDeposit(),
+    'export-backup': () => exportBackup(),
+    'trigger-import': () => triggerImport(),
+    'open-snapshots': () => openSnapshots(),
+    'open-settings': () => openSettings(),
+    'clear-all': () => clearAll(),
+    'save-pin': () => savePin(),
+    'remove-pin': () => removePin(),
+    'export-settings': () => { exportBackup(); closeSettings(); },
+    'unlock': () => tryUnlock(),
+    'snackbar-action': () => runSnackbarAction(),
+    'change-month': el => changeMonth(Number(el.dataset.delta)),
+    'show-day': el => showDay(el.dataset.date),
+    'accept-recurrence': el => acceptRecurrence(Number(el.dataset.index)),
+    'dismiss-suggestion': el => dismissSuggestion(Number(el.dataset.index)),
+    'delete-goal': el => deleteGoal(el.dataset.id),
+    'deposit-goal': el => depositGoal(el.dataset.id),
+    'add-goal': () => addGoal(),
+    'dismiss-alert': el => dismissAlert(Number(el.dataset.index)),
+    'restore-snapshot': el => restoreSnapshot(Number(el.dataset.index))
+  };
+
+  document.addEventListener('click', event => {
+    const control = event.target.closest('[data-action]');
+    if (control) {
+      const handler = actions[control.dataset.action];
+      if (handler) { event.preventDefault(); handler(control, event); }
+      return;
+    }
+    if (event.target.id === 'overlay') closeSheet();
+    else if (event.target.id === 'confirmPanel') cancelDelete();
+    else if (event.target.id === 'depositSheet') closeDeposit();
+    else if (event.target.id === 'menuPanel') closeMenu();
+    else if (event.target.id === 'snapshotPanel') closePanel('snapshotPanel');
+    else if (event.target.id === 'settingsPanel') closeSettings();
+  });
+
+  document.addEventListener('input', event => {
+    if (event.target.id === 'searchInput') onSearch();
+    else if (event.target.id === 'fName') suggestCategory();
+  });
+
+  document.addEventListener('change', event => {
+    const target = event.target;
+    if (target.dataset.settingAlert) toggleAlert(target.dataset.settingAlert, target.checked);
+    else if (target.id === 'setNotification') toggleNotification(target.checked);
+    else if (target.id === 'setTheme') toggleTheme(target.checked);
+    else if (target.id === 'budgetRollover') toggleRollover(target.checked);
+    else if (target.dataset.budgetCat) setBudget(target.dataset.budgetCat, target.value);
+    else if (target.id === 'importFile') importBackup(event);
+  });
+
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      closeSheet(); cancelDelete(); closeDeposit(); closeMenu(); closePanel('snapshotPanel'); closeSettings();
+      return;
+    }
+    if (event.key !== 'Enter') return;
+    if (event.target.id === 'quickAdd') { event.preventDefault(); applyQuickAdd(); }
+    else if (event.target.id === 'pinInput') { event.preventDefault(); tryUnlock(); }
+  });
+}
+
 async function boot() {
   await loadData();
   applyTheme();
+  updateBalanceToggle();
+  setupEvents();
   setupCurrencyMask(document.getElementById('fValue'));
 
   ['fName', 'fValue'].forEach(id => {
@@ -1741,6 +1899,10 @@ async function boot() {
 
   render();
   applyLock();
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && (settings.pin || settings.pinHash)) applyLock();
+  });
 
   const updateOnline = () => { const b = document.getElementById('offlineBadge'); if (b) b.hidden = navigator.onLine; };
   window.addEventListener('online', updateOnline);

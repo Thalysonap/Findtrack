@@ -1,10 +1,11 @@
 {
   "name": "fintrack",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "PWA local para controle de gastos pessoais",
+  "private": true,
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test",
+    "check": "node --check js/core.js && node --check js/storage.js && node --check js/notifications.js && node --check js/script.js && node --check sw.js"
   },
   "keywords": [],
   "author": "",
