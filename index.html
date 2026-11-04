@@ -56,14 +56,14 @@
           <div class="stat stat-income">
             <div class="stat-icon">💰</div>
             <div class="stat-body">
-              <div class="stat-label">Entradas</div>
+              <div class="stat-label">Entradas do mês</div>
               <div class="stat-value green" id="totalIncome">R$ 0,00</div>
             </div>
           </div>
           <div class="stat stat-expense">
             <div class="stat-icon">📤</div>
             <div class="stat-body">
-              <div class="stat-label">A pagar</div>
+              <div class="stat-label">A pagar no mês</div>
               <div class="stat-value red" id="totalExpense">R$ 0,00</div>
             </div>
           </div>
@@ -142,9 +142,10 @@
       <h2 id="sheetTitle">Nova entrada</h2>
 
       <div class="quickadd" id="quickAddBox">
-        <input type="text" id="quickAdd" placeholder="Rápido: mercado 150 ontem" autocomplete="off">
+        <input type="text" id="quickAdd" placeholder="Ex: mercado 150 ontem" autocomplete="off">
         <button type="button" data-action="quick-add" aria-label="Interpretar">↵</button>
       </div>
+      <p class="quickadd-hint">Digite valor, data e “mensal” que eu preencho o resto.</p>
 
       <div class="form-group">
         <label>Tipo</label>
@@ -161,7 +162,11 @@
 
       <div class="form-group">
         <label>Nome</label>
-        <input type="text" id="fName" placeholder="ex: Aluguel, Mercado..." maxlength="80">
+        <input type="text" id="fName" placeholder="ex: Aluguel, Mercado..." maxlength="80" autocomplete="off">
+        <div class="suggest-block" id="nameSuggestWrap" hidden>
+          <div class="suggest-label" id="nameSuggestLabel">Usados recentemente</div>
+          <div class="suggest-list" id="nameSuggest"></div>
+        </div>
       </div>
 
       <div class="form-group">
@@ -175,6 +180,12 @@
       <div class="form-group" id="dateGroup" style="display:none">
         <label>Vencimento</label>
         <input type="date" id="fDate">
+        <div class="date-shortcuts" id="dateShortcuts">
+          <button type="button" data-action="quick-date" data-days="0">Hoje</button>
+          <button type="button" data-action="quick-date" data-days="1">Amanhã</button>
+          <button type="button" data-action="quick-date" data-days="7">+7 dias</button>
+          <button type="button" data-action="quick-date" data-months="1">Próximo mês</button>
+        </div>
       </div>
 
       <button type="button" class="recur-toggle" id="recurToggle" data-action="toggle-recurrence" aria-pressed="false">
@@ -251,6 +262,11 @@
       <label class="switch-row"><span>Contas vencendo</span><input type="checkbox" id="setDue" data-setting-alert="due"></label>
       <label class="switch-row"><span>Orçamento estourado</span><input type="checkbox" id="setBudget" data-setting-alert="budget"></label>
       <label class="switch-row"><span>Saldo previsto negativo</span><input type="checkbox" id="setCashflow" data-setting-alert="cashflow"></label>
+      <div class="alert-advance" id="cashflowAdvanceWrap">
+        <span>Avisar com</span>
+        <input type="number" id="setCashflowDays" min="0" max="60" step="1" inputmode="numeric" aria-label="Dias de antecedência do alerta de saldo negativo">
+        <span>dias de antecedência</span>
+      </div>
       <label class="switch-row"><span>Notificar enquanto o app estiver aberto</span><input type="checkbox" id="setNotification"></label>
 
       <h3 class="settings-sec">Aparência</h3>

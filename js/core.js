@@ -107,6 +107,10 @@
         deadline: isValidDate(goal.deadline || '') ? (goal.deadline || null) : null
       };
     }).filter(Boolean) : [];
+    const horizon = Math.round(Number(source.projectionHorizon));
+    settings.projectionHorizon = [3, 6, 12].includes(horizon) ? horizon : 3;
+    const advance = Math.round(Number(source.cashflowAdvanceDays));
+    settings.cashflowAdvanceDays = Number.isFinite(advance) ? Math.min(60, Math.max(0, advance)) : 7;
     settings.dataVersion = DATA_VERSION;
     settings.balanceHidden = !!settings.balanceHidden;
     settings.pin = source.pin && /^[a-f0-9]{32}$/i.test(source.pin.salt || '') && /^[a-f0-9]{64}$/i.test(source.pin.hash || '')
@@ -152,6 +156,105 @@
       if (balanceCents < 0 && negativeDate === null) negativeDate = event.date;
     }
     return { balanceNowCents: balances.currentCents, endBalanceCents: balanceCents, negativeDate, events };
+  }
+
+  function shiftMonthKey(ym, delta) {
+    const [y, m] = ym.split('-').map(Number);
+    const d = new Date(y, m - 1 + delta, 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }
+
+  function dateInMonthKey(ym, day) {
+    const [y, m] = ym.split('-').map(Number);
+    const last = new Date(y, m, 0).getDate();
+    const safeDay = Math.min(Math.max(1, Number(day) || 1), last);
+    return `${ym}-${String(safeDay).padStart(2, '0')}`;
+  }
+
+  function expandRecurring(items, currentYm, count) {
+    const list = items.slice();
+    const groups = Object.create(null);
+    const nameKey = value => String(value).trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    items.forEach(item => {
+      if (item.type !== 'expense' || item.recurrence !== 'monthly' || !item.date) return;
+      const key = `${nameKey(item.name)}|${item.category}|${item.type}`;
+      (groups[key] = groups[key] || []).push(item);
+    });
+    Object.values(groups).forEach(group => {
+      const latest = group.reduce((a, b) => (a.date > b.date ? a : b));
+      const latestMonth = latest.date.slice(0, 7);
+      const existing = new Set(group.map(item => item.date.slice(0, 7)));
+      const day = Number(latest.date.slice(8, 10)) || 1;
+      for (let index = 0; index < count; index++) {
+        const month = shiftMonthKey(currentYm, index);
+        if (existing.has(month) || month <= latestMonth) continue;
+        list.push({ ...latest, id: `projected_${latest.id}_${month}`, date: dateInMonthKey(month, day), paid: false });
+      }
+    });
+    return list;
+  }
+
+  function calculateMonthlyProjection(items, today = localDateStr(), count = 3) {
+    const months = Math.min(24, Math.max(1, Math.floor(Number(count) || 3)));
+    const currentYm = String(today || localDateStr()).slice(0, 7);
+    const expanded = expandRecurring(items, currentYm, months);
+    const balances = calculateBalances(expanded, today);
+    const monthKey = item => (item.date ? item.date.slice(0, 7) : null);
+
+    const currentIncome = expanded.filter(item => item.type === 'income' && (monthKey(item) === currentYm || !item.date));
+    const currentExpenses = expanded.filter(item => item.type === 'expense' && (monthKey(item) === currentYm || !item.date));
+    const realizedCurrentIncome = sumCents(currentIncome.filter(item => item.date && item.date <= today));
+    const paidCurrentExpenses = sumCents(currentExpenses.filter(item => item.paid));
+    let openingCents = balances.currentCents - realizedCurrentIncome + paidCurrentExpenses;
+
+    const overdue = expanded.filter(item => item.type === 'expense' && !item.paid && item.date && item.date.slice(0, 7) < currentYm);
+    const overdueCents = sumCents(overdue);
+
+    const projection = [];
+    for (let index = 0; index < months; index++) {
+      const month = shiftMonthKey(currentYm, index);
+      const isCurrent = index === 0;
+      const belongs = item => (item.date ? item.date.slice(0, 7) === month : isCurrent);
+      const incomes = expanded.filter(item => item.type === 'income' && belongs(item));
+      const expenses = expanded.filter(item => item.type === 'expense' && belongs(item));
+      const incomeCents = sumCents(incomes);
+      const expenseCents = sumCents(expenses);
+      const paidExpenseCents = sumCents(expenses.filter(item => item.paid));
+      const openExpenseCents = expenseCents - paidExpenseCents;
+      const overdueForMonth = isCurrent ? overdueCents : 0;
+      const outflowCents = isCurrent ? expenseCents + overdueForMonth : openExpenseCents;
+      const netCents = incomeCents - outflowCents;
+
+      const events = [];
+      incomes.forEach(item => events.push({ date: item.date || today, delta: item.valueCents }));
+      (isCurrent ? expenses : expenses.filter(item => !item.paid)).forEach(item => events.push({ date: item.date || today, delta: -item.valueCents }));
+      if (isCurrent) overdue.forEach(item => events.push({ date: today, delta: -item.valueCents }));
+      events.sort((a, b) => a.date.localeCompare(b.date));
+
+      let running = openingCents;
+      let negativeDate = running < 0 ? (isCurrent ? today : `${month}-01`) : null;
+      for (const event of events) {
+        running += event.delta;
+        if (running < 0 && negativeDate === null) negativeDate = event.date;
+      }
+
+      const closingCents = openingCents + netCents;
+      projection.push({
+        month,
+        openingCents,
+        incomeCents,
+        expenseCents,
+        paidExpenseCents,
+        openExpenseCents,
+        overdueCents: overdueForMonth,
+        outflowCents,
+        netCents,
+        closingCents,
+        negativeDate
+      });
+      openingCents = closingCents;
+    }
+    return projection;
   }
 
   function createBackup(items, settings, snapshots) {
@@ -201,6 +304,7 @@
     sumCents,
     calculateBalances,
     calculateCashFlow,
+    calculateMonthlyProjection,
     createBackup,
     parseBackup
   };

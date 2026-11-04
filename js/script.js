@@ -30,6 +30,7 @@ let categoryManuallySet = false;
 let viewMonth = currentMonthStr();
 let unlocked = true;
 let suggestionRefs = [];
+let nameSuggestionRefs = [];
 let alertRefs = [];
 let persistTimer = null;
 let persistPromise = Promise.resolve();
@@ -51,7 +52,9 @@ function defaultSettings() {
     pin: null,
     balanceHidden: false,
     dataVersion: FintrackCore.DATA_VERSION,
-    theme: 'dark'
+    theme: 'dark',
+    projectionHorizon: 3,
+    cashflowAdvanceDays: 7
   };
 }
 
@@ -292,15 +295,17 @@ function markInvalid(input, msg) {
    Totais e hero
    ═══════════════════════════════════════════ */
 function calcTotals() {
-  const expenses = items.filter(i => i.type === 'expense');
-  const income = items.filter(i => i.type === 'income');
+  const cur = currentMonthStr();
+  const expenses = items.filter(i => i.type === 'expense' && (inMonth(i.date, cur) || !i.date));
+  const income = items.filter(i => i.type === 'income' && (inMonth(i.date, cur) || !i.date));
+  const overdue = items.filter(i => i.type === 'expense' && !i.paid && i.date && i.date.slice(0, 7) < cur);
   const balances = FintrackCore.calculateBalances(items, todayStr());
-  const totalI = balances.availableIncome;
-  const paidE = sum(expenses.filter(i => i.paid));
-  const pendingE = sum(expenses.filter(i => !i.paid));
+  const totalI = sum(income);
+  const pendingE = sum(expenses.filter(i => !i.paid)) + sum(overdue);
 
+  const projection = FintrackCore.calculateMonthlyProjection(items, todayStr(), 1);
   heroBalances.today = balances.currentCents;
-  heroBalances.all = balances.projectedCents;
+  heroBalances.all = projection.length ? projection[0].closingCents : balances.projectedCents;
   updateHeroDisplay();
 
   document.getElementById('totalExpense').textContent = fmt(pendingE);
@@ -309,7 +314,7 @@ function calcTotals() {
   const paidCount = expenses.filter(i => i.paid).length;
   const total = expenses.length;
   const pct = total ? Math.round(paidCount / total * 100) : 0;
-  document.getElementById('paidCount').textContent = `${paidCount} de ${total} pagas`;
+  document.getElementById('paidCount').textContent = `${paidCount} de ${total} pagas no mês`;
   document.getElementById('paidPercent').textContent = `${pct}%`;
 
   const fill = document.getElementById('progressFill');
@@ -324,8 +329,9 @@ function updateHeroDisplay() {
   const el = document.getElementById('heroBalance');
   el.textContent = fmtSigned(value);
   el.className = 'hero-balance ' + (value > 0 ? 'positive' : value < 0 ? 'negative' : 'zero');
+  const [year, month] = currentMonthStr().split('-').map(Number);
   document.getElementById('heroSublabel').textContent =
-    heroView === 'today' ? 'disponível hoje' : 'incluindo entradas e contas futuras';
+    heroView === 'today' ? 'disponível hoje' : `saldo no fim de ${MONTHS[month - 1]} de ${year}`;
 }
 
 function setHeroView(view) {
@@ -396,32 +402,71 @@ function renderHome() {
 
   if (!filtered.length) {
     wrap.innerHTML = searchTerm.trim()
-      ? `<div class="empty"><div class="empty-icon">🔍</div><p>Nenhum resultado para "<b>${escapeHtml(searchTerm.trim())}</b>".</p></div>`
-      : `<div class="empty"><div class="empty-icon">📭</div><p>Nada por aqui ainda.<br>Toque em <b>Adicionar</b> para começar.</p></div>`;
+      ? `<div class="empty"><div class="empty-icon">🔍</div><p>Nenhum resultado para "<b>${escapeHtml(searchTerm.trim())}</b>".</p><button type="button" class="empty-cta" data-action="clear-search">Limpar busca</button></div>`
+      : `<div class="empty"><div class="empty-icon">📭</div><p>Nada por aqui ainda.<br>Adicione seu primeiro lançamento para começar.</p><button type="button" class="empty-cta" data-action="open-sheet">Adicionar lançamento</button></div>`;
     return;
   }
 
   const sorted = sortByUrgency(filtered);
   const today = todayStr();
+  const cur = currentMonthStr();
+  const separateUrgent = currentTab === 'all' || currentTab === 'open';
   let html = '';
 
-  if (currentTab === 'all' || currentTab === 'open') {
-    const todayItems = sorted.filter(i => i.type === 'expense' && !i.paid && i.date === today);
+  if (separateUrgent) {
     const overdueItems = sorted.filter(i => i.type === 'expense' && !i.paid && i.date && i.date < today);
-    const otherItems = sorted.filter(i => !(i.type === 'expense' && !i.paid && i.date === today) && !(i.type === 'expense' && !i.paid && i.date && i.date < today));
-
-    if (overdueItems.length) html += renderSection('🔴 Vencidas', overdueItems, 'section-overdue');
+    const todayItems = sorted.filter(i => i.type === 'expense' && !i.paid && i.date === today);
+    const rest = sorted.filter(i => !(i.type === 'expense' && !i.paid && i.date && i.date <= today));
+    if (overdueItems.length) html += renderSection('🔴 Vencidas', overdueItems, 'section-overdue', fmt(sum(overdueItems)));
     if (todayItems.length) html += renderTodaySection(todayItems);
-    if (otherItems.length) {
-      if (overdueItems.length || todayItems.length) html += renderSection('Próximas', otherItems, 'section-normal');
-      else html += renderItemsList(otherItems);
-    }
+    html += renderMonthGroups(rest, currentTab, cur);
   } else {
-    html += renderItemsList(sorted);
+    html += renderMonthGroups(sorted, currentTab, cur);
   }
 
   wrap.innerHTML = html;
   setupSwipeListeners();
+}
+
+function renderMonthGroups(list, tab, cur) {
+  const groups = new Map();
+  list.forEach(item => {
+    const key = item.date ? item.date.slice(0, 7) : '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  });
+  const keys = [...groups.keys()].sort((a, b) => compareMonthGroups(a, b, cur, tab));
+  return keys.map(key => {
+    const group = groups.get(key);
+    if (!key) return renderSection('Sem data', group, 'section-normal', groupMeta(group, tab));
+    const hasOverdue = key < cur && group.some(i => i.type === 'expense' && !i.paid);
+    const cls = 'section-month ' + (key === cur ? 'section-current' : hasOverdue ? 'section-overdue' : 'section-normal');
+    return renderSection(monthLabel(key), group, cls, groupMeta(group, tab));
+  }).join('');
+}
+
+function compareMonthGroups(a, b, cur, tab) {
+  if (a === b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  if (tab === 'done') return b.localeCompare(a);
+  if (a === cur) return -1;
+  if (b === cur) return 1;
+  const aFuture = a > cur;
+  const bFuture = b > cur;
+  if (aFuture && bFuture) return a.localeCompare(b);
+  if (!aFuture && !bFuture) return b.localeCompare(a);
+  return aFuture ? -1 : 1;
+}
+
+function groupMeta(list, tab) {
+  if (!list.length) return '';
+  if (tab === 'all') {
+    const income = sum(list.filter(i => i.type === 'income'));
+    const expense = sum(list.filter(i => i.type === 'expense'));
+    return fmtSigned(income - expense);
+  }
+  return fmt(sum(list));
 }
 
 function renderTodaySection(list) {
@@ -436,13 +481,11 @@ function renderTodaySection(list) {
   return html + '</div></div>';
 }
 
-function renderSection(title, list, cls) {
-  let html = `<div class="section-group ${cls || ''}"><div class="section-title-row"><span class="section-title-text">${title}</span></div>`;
+function renderSection(title, list, cls, meta) {
+  let html = `<div class="section-group ${cls || ''}"><div class="section-title-row"><span class="section-title-text">${title}</span>${meta ? `<span class="section-title-meta">${meta}</span>` : ''}</div>`;
   list.forEach(it => { html += renderItem(it); });
   return html + '</div>';
 }
-
-function renderItemsList(list) { return list.map(it => renderItem(it)).join(''); }
 
 function renderItem(it, isToday) {
   const status = dueStatus(it.date);
@@ -601,6 +644,14 @@ function switchTab(tab) {
 function onSearch() {
   searchTerm = document.getElementById('searchInput').value;
   render();
+}
+
+function clearSearch() {
+  const input = document.getElementById('searchInput');
+  input.value = '';
+  searchTerm = '';
+  render();
+  input.focus();
 }
 
 /* ═══════════════════════════════════════════
@@ -842,6 +893,105 @@ function suggestCategory() {
   if (guess) setCategory(guess, false);
 }
 
+function nameHistory(type = currentType) {
+  const map = new Map();
+  items.forEach(it => {
+    if (!it.name || it.type !== type) return;
+    const key = normalize(it.name.trim());
+    if (!key) return;
+    const at = Number(it.createdAt) || 0;
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, { item: it, count: 1, lastAt: at });
+      return;
+    }
+    existing.count += 1;
+    const newer = String(it.date || '').localeCompare(String(existing.item.date || '')) > 0 ||
+      (it.date === existing.item.date && at >= existing.lastAt);
+    if (newer) existing.item = it;
+    existing.lastAt = Math.max(existing.lastAt, at);
+  });
+  return [...map.values()].sort((a, b) => b.count - a.count || b.lastAt - a.lastAt);
+}
+
+function renderNameSuggestions(query = '') {
+  const wrap = document.getElementById('nameSuggestWrap');
+  const list = document.getElementById('nameSuggest');
+  const label = document.getElementById('nameSuggestLabel');
+  if (!wrap || !list || !label) return;
+  if (editId) { wrap.hidden = true; nameSuggestionRefs = []; return; }
+  const q = normalize(String(query || '').trim());
+  const history = nameHistory(currentType);
+  const visible = (q ? history.filter(entry => normalize(entry.item.name).includes(q)) : history).slice(0, 6);
+  nameSuggestionRefs = visible;
+  if (!visible.length) { wrap.hidden = true; list.innerHTML = ''; return; }
+  label.textContent = q ? 'Sugestões' : 'Usados recentemente';
+  list.innerHTML = visible.map((entry, index) => {
+    const it = entry.item;
+    const meta = `${fmt(it.valueCents)}${it.recurrence === 'monthly' ? ' · mensal' : ''}`;
+    return `<button type="button" class="suggest-chip" data-action="use-name-suggestion" data-index="${index}">
+      <span class="suggest-chip-name">${escapeHtml(it.name)}</span>
+      <span class="suggest-chip-meta">${escapeHtml(meta)}</span>
+    </button>`;
+  }).join('');
+  wrap.hidden = false;
+}
+
+function latestByName(name, type = currentType) {
+  const key = normalize(String(name || '').trim());
+  if (!key) return null;
+  return items
+    .filter(it => it.type === type && normalize(it.name.trim()) === key)
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) ||
+      (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))[0] || null;
+}
+
+function applyNameAutoFill() {
+  if (editId) return false;
+  const match = latestByName(document.getElementById('fName').value);
+  if (!match) return false;
+  if (!getValueCents() && match.valueCents > 0) setValueDisplay(match.valueCents);
+  if (!categoryManuallySet && match.category) setCategory(match.category, false);
+  return true;
+}
+
+function suggestionDateFor(item) {
+  if (!item.date) return todayStr();
+  const day = Number(item.date.slice(8, 10)) || 1;
+  if (item.recurrence !== 'monthly') return todayStr();
+  const cur = currentMonthStr();
+  const hasCurrent = items.some(it => it.type === item.type &&
+    normalize(it.name.trim()) === normalize(item.name.trim()) &&
+    (it.date || '').slice(0, 7) === cur);
+  return dateInMonth(hasCurrent ? shiftMonth(cur, 1) : cur, day);
+}
+
+function useNameSuggestion(index) {
+  const entry = nameSuggestionRefs[index];
+  if (!entry) return;
+  const it = entry.item;
+  document.getElementById('fName').value = it.name;
+  setValueDisplay(it.valueCents);
+  setCategory(it.category || (currentType === 'income' ? '💵 Salário' : '📦 Outros'), false);
+  recurrence = it.type === 'expense' && it.recurrence === 'monthly' ? 'monthly' : null;
+  updateRecurUI();
+  document.getElementById('fDate').value = suggestionDateFor(it);
+  showDateField();
+  renderNameSuggestions(it.name);
+  toast('Preenchido com base no histórico');
+}
+
+function setQuickDate(days = 0, months = 0) {
+  const input = document.getElementById('fDate');
+  if (months) {
+    const base = input.value || todayStr();
+    const target = shiftMonth(base.slice(0, 7), months);
+    input.value = dateInMonth(target, Number(base.slice(8, 10)) || 1);
+  } else {
+    input.value = localDateStr(new Date(Date.now() + Number(days) * 86400000));
+  }
+}
+
 /* ═══════════════════════════════════════════
    Recorrência
    ═══════════════════════════════════════════ */
@@ -878,11 +1028,20 @@ function updateRecurUI() {
 function parseQuickAdd(text) {
   let t = ' ' + String(text).toLowerCase().trim() + ' ';
 
+  let recurrence = null;
+  const recurrenceRe = /\b(mensalmente|mensal|recorrente|fixo|assinatura|todo\s+m[eê]s)\b/gi;
+  if (/\b(mensalmente|mensal|recorrente|fixo|assinatura|todo\s+m[eê]s)\b/i.test(t)) recurrence = 'monthly';
+  t = t.replace(recurrenceRe, ' ');
+
   let date = todayStr();
   if (/\bontem\b/.test(t)) { date = localDateStr(new Date(Date.now() - 86400000)); t = t.replace(/\bontem\b/g, ' '); }
   else if (/amanh[aã]/.test(t)) { date = localDateStr(new Date(Date.now() + 86400000)); t = t.replace(/amanh[aã]/g, ' '); }
   else if (/\bhoje\b/.test(t)) { t = t.replace(/\bhoje\b/g, ' '); }
-  else {
+  else if (/\b(pr[oó]ximo m[eê]s|m[eê]s que vem)\b/.test(t)) {
+    const next = shiftMonth(currentMonthStr(), 1);
+    date = dateInMonth(next, new Date().getDate());
+    t = t.replace(/\b(pr[oó]ximo m[eê]s|m[eê]s que vem)\b/g, ' ');
+  } else {
     const dm = t.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
     if (dm) {
       const day = dm[1].padStart(2, '0');
@@ -890,6 +1049,14 @@ function parseQuickAdd(text) {
       const yr = dm[3] ? (dm[3].length === 2 ? '20' + dm[3] : dm[3]) : String(new Date().getFullYear());
       date = `${yr}-${mon}-${day}`;
       t = t.replace(dm[0], ' ');
+    } else {
+      const dia = t.match(/\bdia\s+(\d{1,2})\b/);
+      if (dia) {
+        const day = Math.min(31, Math.max(1, Number(dia[1])));
+        const month = day >= new Date().getDate() ? currentMonthStr() : shiftMonth(currentMonthStr(), 1);
+        date = dateInMonth(month, day);
+        t = t.replace(dia[0], ' ');
+      }
     }
   }
 
@@ -903,7 +1070,7 @@ function parseQuickAdd(text) {
   }
 
   const name = t.replace(/\s+/g, ' ').trim();
-  return { name: name || '', value, date };
+  return { name: name || '', value, date, recurrence };
 }
 
 function applyQuickAdd() {
@@ -915,10 +1082,16 @@ function applyQuickAdd() {
   document.getElementById('fDate').value = parsed.date;
   document.getElementById('dateGroup').style.display = 'block';
   document.getElementById('dateToggle').style.display = 'none';
+  if (parsed.recurrence) {
+    recurrence = 'monthly';
+    updateRecurUI();
+  }
   const guess = guessCategory(parsed.name, 'expense');
   if (guess) setCategory(guess, false);
+  applyNameAutoFill();
+  renderNameSuggestions(parsed.name);
   input.value = '';
-  toast('Campos preenchidos ✨');
+  toast('Campos preenchidos');
 }
 
 /* ═══════════════════════════════════════════
@@ -960,6 +1133,7 @@ function openSheet(id) {
     }
     recurrence = it.recurrence || null;
     updateRecurUI();
+    renderNameSuggestions();
   } else {
     document.getElementById('sheetTitle').textContent = 'Nova entrada';
     document.getElementById('fName').value = '';
@@ -973,6 +1147,7 @@ function openSheet(id) {
     document.getElementById('btnDuplicate').style.display = 'none';
     recurrence = null;
     updateRecurUI();
+    renderNameSuggestions();
   }
 
   document.getElementById('overlay').classList.add('open');
@@ -995,6 +1170,7 @@ function setType(type) {
   if (recurBtn) recurBtn.style.display = type === 'expense' ? 'flex' : 'none';
   if (type === 'income') { recurrence = null; updateRecurUI(); }
   if (typeof renderChips === 'function') { ensureCategoryForType(); renderChips(); }
+  if (document.getElementById('nameSuggestWrap')) renderNameSuggestions(document.getElementById('fName').value);
 }
 
 function saveItem() {
@@ -1161,14 +1337,8 @@ function categoryTotals(ym) {
   return Object.entries(map).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
 }
 
-function cashFlow() {
-  const result = FintrackCore.calculateCashFlow(items, todayStr());
-  return {
-    balanceNow: result.balanceNowCents,
-    endBalance: result.endBalanceCents,
-    negativeDate: result.negativeDate,
-    events: result.events
-  };
+function monthlyProjection(count = 3) {
+  return FintrackCore.calculateMonthlyProjection(items, todayStr(), count);
 }
 
 function donutSVG(segs) {
@@ -1188,26 +1358,45 @@ function donutSVG(segs) {
   </svg>`;
 }
 
-function cashflowSVG(cf) {
-  const today = todayStr();
-  const dayNum = d => Math.round((new Date(d + 'T00:00:00') - new Date(today + 'T00:00:00')) / 86400000);
-  const pts = [{ x: 0, y: cf.balanceNow }];
-  let bal = cf.balanceNow;
-  for (const e of cf.events) { bal += e.valueCents; pts.push({ x: Math.max(0, dayNum(e.date)), y: bal }); }
-  if (pts.length < 2) return '';
+function monthlyBarsSVG(projection) {
+  if (!projection.length) return '';
+  const max = Math.max(1, ...projection.map(m => Math.max(m.incomeCents, m.outflowCents)));
+  if (max <= 1) return '';
+  const W = 300, H = 120, top = 10, base = 94, pad = 10;
+  const slot = (W - 2 * pad) / projection.length;
+  const barW = Math.max(7, Math.min(15, slot * 0.24));
+  const bars = projection.map((m, i) => {
+    const cx = pad + slot * (i + 0.5);
+    const incH = Math.round((Math.max(0, m.incomeCents) / max) * (base - top));
+    const expH = Math.round((Math.max(0, m.outflowCents) / max) * (base - top));
+    const label = MONTHS[Number(m.month.slice(5, 7)) - 1].slice(0, 3);
+    return `
+      <rect x="${(cx - barW - 2).toFixed(1)}" y="${base - incH}" width="${barW}" height="${Math.max(1, incH)}" rx="3" fill="var(--green)"/>
+      <rect x="${(cx + 2).toFixed(1)}" y="${base - expH}" width="${barW}" height="${Math.max(1, expH)}" rx="3" fill="var(--red)"/>
+      <text x="${cx.toFixed(1)}" y="${H - 8}" text-anchor="middle" fill="var(--muted)" font-size="9" font-weight="600">${label}</text>`;
+  }).join('');
+  return `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+    <line x1="${pad}" y1="${base}" x2="${W - pad}" y2="${base}" stroke="var(--border)" stroke-width="1"/>
+    ${bars}
+  </svg>`;
+}
 
-  const W = 300, H = 110, pad = 8;
-  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs) || 1;
-  const minY = Math.min(0, ...ys), maxY = Math.max(0, ...ys);
-  const sx = x => pad + ((x - minX) / ((maxX - minX) || 1)) * (W - 2 * pad);
-  const sy = y => H - pad - ((y - minY) / ((maxY - minY) || 1)) * (H - 2 * pad);
-  const path = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(' ');
-  const zero = sy(0).toFixed(1);
-
+function projectionBalanceSVG(projection) {
+  if (!projection.length) return '';
+  const values = [projection[0].openingCents, ...projection.map(m => m.closingCents)];
+  const W = 300, H = 92, padX = 10, padTop = 8, padBottom = 8;
+  const max = Math.max(0, ...values);
+  const min = Math.min(0, ...values);
+  const span = (max - min) || 1;
+  const x = i => padX + (i / (values.length - 1 || 1)) * (W - 2 * padX);
+  const y = v => H - padBottom - ((v - min) / span) * (H - padTop - padBottom);
+  const path = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const zero = y(0).toFixed(1);
+  const dots = values.map((v, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="2.4" fill="var(--today)"/>`).join('');
   return `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-    <line x1="${pad}" y1="${zero}" x2="${W - pad}" y2="${zero}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4 4"/>
-    <path d="${path}" fill="none" stroke="var(--green)" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+    <line x1="${padX}" y1="${zero}" x2="${W - padX}" y2="${zero}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4 4"/>
+    <path d="${path}" fill="none" stroke="var(--today)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+    ${dots}
   </svg>`;
 }
 
@@ -1240,7 +1429,8 @@ function smartSummary() {
 
 function renderAnalysis() {
   const wrap = document.getElementById('analysisWrap');
-  const cf = cashFlow();
+  const horizon = settings.projectionHorizon || 3;
+  const projection = monthlyProjection(horizon);
   const cats = categoryTotals(viewMonth);
   const colored = cats.map((c, idx) => ({ ...c, color: CHART_COLORS[idx % CHART_COLORS.length] }));
 
@@ -1255,16 +1445,32 @@ function renderAnalysis() {
     `<div class="legend-item"><span class="legend-dot" style="background:${c.color}"></span><span class="legend-name">${escapeHtml(c.label)}</span><span class="legend-val">${fmtShort(c.value)}</span></div>`
   ).join('');
 
-  let forecastHtml;
-  if (cf.negativeDate) {
-    forecastHtml = `
-      <div class="forecast-big neg">${fmtSigned(cf.endBalance)}</div>
-      <div class="forecast-desc">Seu saldo fica <b style="color:var(--red)">negativo em ${fmtDate(cf.negativeDate)}</b>. Faltam ${fmt(Math.abs(cf.endBalance))} para cobrir tudo.</div>`;
-  } else {
-    forecastHtml = `
-      <div class="forecast-big pos">${fmtSigned(cf.endBalance)}</div>
-      <div class="forecast-desc">Seu saldo atual (${fmt(cf.balanceNow)}) cobre todas as contas em aberto.</div>`;
-  }
+  const projectionHtml = projection.map((m, idx) => {
+    const cls = m.closingCents < 0 ? 'neg' : 'pos';
+    const overdue = m.overdueCents > 0
+      ? `<span class="proj-overdue">inclui ${fmt(m.overdueCents)} vencidas</span>`
+      : '';
+    const warn = m.negativeDate
+      ? `<div class="proj-warn">Saldo fica negativo em ${fmtDate(m.negativeDate)}</div>`
+      : '';
+    return `
+      <div class="proj-row${idx === 0 ? ' current' : ''}">
+        <div class="proj-top">
+          <span class="proj-month">${monthLabel(m.month)}</span>
+          <span class="proj-balance ${cls}">${fmtSigned(m.closingCents)}</span>
+        </div>
+        <div class="proj-meta">
+          <span class="proj-in">+ ${fmt(m.incomeCents)}</span>
+          <span class="proj-out">− ${fmt(m.outflowCents)}</span>
+          ${overdue}
+        </div>
+        ${warn}
+      </div>`;
+  }).join('');
+  const hasFlow = projection.some(m => m.incomeCents > 0 || m.outflowCents > 0);
+  const horizonHtml = [3, 6, 12].map(n =>
+    `<button class="proj-horizon-btn${n === horizon ? ' active' : ''}" data-action="set-projection-horizon" data-months="${n}">${n} meses</button>`
+  ).join('');
 
   // Sugestões de recorrência
   const suggestions = detectRecurrences();
@@ -1286,9 +1492,20 @@ function renderAnalysis() {
     </div>
 
     <div class="card">
-      <div class="card-title"><span>Previsão de saldo</span><span class="card-sub">contas em aberto</span></div>
-      ${forecastHtml}
-      <div style="margin-top:12px">${cashflowSVG(cf)}</div>
+      <div class="card-title"><span>Previsão por mês</span><span class="card-sub">só o que vence em cada mês</span></div>
+      <div class="proj-horizon">${horizonHtml}</div>
+      <div class="proj-list">${projectionHtml}</div>
+      ${hasFlow ? `<div class="proj-chart">
+        <div class="proj-line-label">Saldo acumulado</div>
+        ${projectionBalanceSVG(projection)}
+        <div class="proj-line-label" style="margin-top:10px">Entradas e saídas por mês</div>
+        ${monthlyBarsSVG(projection)}
+        <div class="proj-legend">
+          <span><i style="background:var(--green)"></i>entradas</span>
+          <span><i style="background:var(--red)"></i>saídas</span>
+          <span><i style="background:var(--today)"></i>saldo</span>
+        </div>
+      </div>` : ''}
     </div>
 
     <div class="card">
@@ -1299,6 +1516,12 @@ function renderAnalysis() {
     </div>
 
     ${suggHtml ? `<div class="card"><div class="card-title"><span>Sugestões</span></div>${suggHtml}</div>` : ''}`;
+}
+
+function setProjectionHorizon(months) {
+  settings.projectionHorizon = [3, 6, 12].includes(months) ? months : 3;
+  saveSettings();
+  renderAnalysis();
 }
 
 /* ─── Detecção de recorrência ────────────── */
@@ -1537,8 +1760,21 @@ function computeAlerts() {
   }
 
   if (settings.alerts.cashflow) {
-    const cf = cashFlow();
-    if (cf.negativeDate) out.push({ key: 'cashflow:' + cf.negativeDate, type: 'danger', text: `Saldo previsto negativo em ${fmtDate(cf.negativeDate)}.` });
+    const advance = Math.max(0, Number(settings.cashflowAdvanceDays) || 0);
+    const monthsAhead = Math.max(3, Math.ceil(advance / 30) + 1);
+    const negative = monthlyProjection(monthsAhead).find(m => m.negativeDate);
+    if (negative) {
+      const label = monthLabel(negative.month);
+      const daysUntil = Math.round((new Date(negative.negativeDate + 'T00:00:00') - new Date(today + 'T00:00:00')) / 86400000);
+      if (daysUntil <= advance) {
+        const text = daysUntil < 0
+          ? `Saldo previsto negativo desde ${fmtDate(negative.negativeDate)} (${label}).`
+          : daysUntil === 0
+            ? `Saldo previsto negativo hoje (${label}).`
+            : `Saldo previsto negativo em ${fmtDate(negative.negativeDate)} (${label}) — em ${daysUntil} dia(s).`;
+        out.push({ key: 'cashflow:' + negative.negativeDate, type: 'danger', text });
+      }
+    }
   }
 
   return out.filter(a => !settings.dismissed[a.key]);
@@ -1611,6 +1847,8 @@ function openSettings() {
   document.getElementById('setBudget').checked = !!settings.alerts.budget;
   document.getElementById('setCashflow').checked = !!settings.alerts.cashflow;
   document.getElementById('setNotification').checked = !!settings.notification;
+  document.getElementById('setCashflowDays').value = settings.cashflowAdvanceDays;
+  updateCashflowAdvanceVisibility();
   document.getElementById('setTheme').checked = settings.theme === 'light';
   const hasPin = !!(settings.pin || settings.pinHash);
   document.getElementById('pinRemoveBtn').style.display = hasPin ? 'inline-block' : 'none';
@@ -1619,7 +1857,26 @@ function openSettings() {
 }
 function closeSettings() { closePanel('settingsPanel'); }
 
-function toggleAlert(key, val) { settings.alerts[key] = !!val; saveSettings(); renderAlerts(); }
+function toggleAlert(key, val) {
+  settings.alerts[key] = !!val;
+  saveSettings();
+  if (key === 'cashflow') updateCashflowAdvanceVisibility();
+  renderAlerts();
+}
+
+function updateCashflowAdvanceVisibility() {
+  const wrap = document.getElementById('cashflowAdvanceWrap');
+  if (wrap) wrap.hidden = !settings.alerts.cashflow;
+}
+
+function setCashflowAdvance(value) {
+  const days = Math.min(60, Math.max(0, Math.round(Number(value) || 0)));
+  settings.cashflowAdvanceDays = days;
+  const input = document.getElementById('setCashflowDays');
+  if (input) input.value = days;
+  saveSettings();
+  renderAlerts();
+}
 
 function toggleNotification(val) {
   if (!val) {
@@ -1806,6 +2063,9 @@ function setupEvents() {
     'open-sheet': el => openSheet(el.dataset.id),
     'switch-view': el => switchView(el.dataset.view),
     'quick-add': () => applyQuickAdd(),
+    'use-name-suggestion': el => useNameSuggestion(Number(el.dataset.index)),
+    'quick-date': el => setQuickDate(Number(el.dataset.days) || 0, Number(el.dataset.months) || 0),
+    'clear-search': () => clearSearch(),
     'set-type': el => setType(el.dataset.type),
     'toggle-categories': () => toggleCategoryChips(),
     'set-category': el => { setCategory(el.dataset.cat, true); document.getElementById('categoryChips').style.display = 'none'; },
@@ -1833,6 +2093,7 @@ function setupEvents() {
     'unlock': () => tryUnlock(),
     'snackbar-action': () => runSnackbarAction(),
     'change-month': el => changeMonth(Number(el.dataset.delta)),
+    'set-projection-horizon': el => setProjectionHorizon(Number(el.dataset.months)),
     'show-day': el => showDay(el.dataset.date),
     'accept-recurrence': el => acceptRecurrence(Number(el.dataset.index)),
     'dismiss-suggestion': el => dismissSuggestion(Number(el.dataset.index)),
@@ -1860,13 +2121,18 @@ function setupEvents() {
 
   document.addEventListener('input', event => {
     if (event.target.id === 'searchInput') onSearch();
-    else if (event.target.id === 'fName') suggestCategory();
+    else if (event.target.id === 'fName') {
+      suggestCategory();
+      applyNameAutoFill();
+      renderNameSuggestions(event.target.value);
+    }
   });
 
   document.addEventListener('change', event => {
     const target = event.target;
     if (target.dataset.settingAlert) toggleAlert(target.dataset.settingAlert, target.checked);
     else if (target.id === 'setNotification') toggleNotification(target.checked);
+    else if (target.id === 'setCashflowDays') setCashflowAdvance(target.value);
     else if (target.id === 'setTheme') toggleTheme(target.checked);
     else if (target.id === 'budgetRollover') toggleRollover(target.checked);
     else if (target.dataset.budgetCat) setBudget(target.dataset.budgetCat, target.value);

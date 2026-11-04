@@ -52,6 +52,32 @@ test('aplicação inicializa com DOM limpo e sem manipuladores inline', async ()
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(elements.get('heroBalance').textContent, 'R$ 0,00');
   assert.equal(elements.get('lockScreen').hidden, true);
+
+  vm.runInContext(`
+    items = [{ id: 'hist1', name: 'Mercado', valueCents: 15000, date: '2026-01-10', category: '🛒 Mercado', type: 'expense', paid: true, recurrence: null, createdAt: 1 }];
+    openSheet();
+    document.getElementById('fName').value = 'Mercado';
+    applyNameAutoFill();
+    renderNameSuggestions('Merc');
+  `, context);
+  assert.equal(elements.get('fValue').dataset.raw, '15000');
+  assert.equal(elements.get('fCategory').value, '🛒 Mercado');
+  assert.equal(elements.get('nameSuggestWrap').hidden, false);
+  assert.match(elements.get('nameSuggest').innerHTML, /Mercado/);
+
+  const parsed = vm.runInContext('parseQuickAdd("aluguel 1200 dia 5 mensal")', context);
+  assert.equal(parsed.recurrence, 'monthly');
+  assert.equal(parsed.value, 120000);
+  assert.equal(parsed.name, 'aluguel');
+
   vm.runInContext('toggleBalanceVisibility()', context);
   assert.equal(elements.get('heroBalance').textContent, 'R$ ••••');
+
+  vm.runInContext('switchView("analysis")', context);
+  const analysis = elements.get('analysisWrap').innerHTML;
+  assert.match(analysis, /Previsão por mês/);
+  assert.match(analysis, /3 meses/);
+
+  vm.runInContext('openSettings()', context);
+  assert.equal(elements.get('setCashflowDays').value, 7);
 });
