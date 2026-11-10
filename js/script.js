@@ -28,6 +28,7 @@ let searchTerm = '';
 let recurrence = null;
 let categoryManuallySet = false;
 let viewMonth = currentMonthStr();
+let homeMonth = currentMonthStr();
 let unlocked = true;
 let suggestionRefs = [];
 let nameSuggestionRefs = [];
@@ -43,6 +44,7 @@ function defaultSettings() {
     budgets: {},
     budgetRollover: false,
     goals: [],
+    closedMonths: [],
     alerts: { due: true, budget: true, cashflow: true },
     notification: false,
     learnedRules: {},
@@ -218,6 +220,38 @@ function dateInMonth(ym, day) {
   return `${ym}-${String(d).padStart(2, '0')}`;
 }
 
+/* ─── Meses fechados (fechamento) ─────────── */
+function isMonthClosed(ym) {
+  return !!ym && settings.closedMonths.includes(ym);
+}
+
+function syncClosedMonths() {
+  const cur = currentMonthStr();
+  let changed = false;
+  items.forEach(i => {
+    const ym = i.date ? i.date.slice(0, 7) : '';
+    if (ym && ym < cur && !settings.closedMonths.includes(ym)) {
+      settings.closedMonths.push(ym);
+      changed = true;
+    }
+  });
+  if (changed) saveSettings();
+}
+
+function homeMonths() {
+  const set = new Set();
+  items.forEach(i => { if (i.date) set.add(i.date.slice(0, 7)); });
+  set.add(currentMonthStr());
+  if (homeMonth) set.add(homeMonth);
+  return [...set].sort();
+}
+
+function monthBadge(ym) {
+  if (ym === currentMonthStr()) return '<span class="month-badge">atual</span>';
+  if (isMonthClosed(ym)) return '<span class="month-badge closed">fechado</span>';
+  return '';
+}
+
 /* ─── Datas de vencimento ────────────────── */
 function dueStatus(d) {
   if (!d) return null;
@@ -294,22 +328,39 @@ function markInvalid(input, msg) {
 /* ═══════════════════════════════════════════
    Totais e hero
    ═══════════════════════════════════════════ */
+function openOverdueCents() {
+  const cur = currentMonthStr();
+  return sum(items.filter(i => i.type === 'expense' && !i.paid && i.date
+    && i.date.slice(0, 7) < cur && !isMonthClosed(i.date.slice(0, 7))));
+}
+
 function calcTotals() {
   const cur = currentMonthStr();
-  const expenses = items.filter(i => i.type === 'expense' && (inMonth(i.date, cur) || !i.date));
-  const income = items.filter(i => i.type === 'income' && (inMonth(i.date, cur) || !i.date));
-  const overdue = items.filter(i => i.type === 'expense' && !i.paid && i.date && i.date.slice(0, 7) < cur);
-  const balances = FintrackCore.calculateBalances(items, todayStr());
+  const ym = homeMonth;
+  const monthItems = items.filter(i => inMonth(i.date, ym) || (!i.date && ym === cur));
+  const expenses = monthItems.filter(i => i.type === 'expense');
+  const income = monthItems.filter(i => i.type === 'income');
   const totalI = sum(income);
-  const pendingE = sum(expenses.filter(i => !i.paid)) + sum(overdue);
+  const totalE = sum(expenses);
 
-  const projection = FintrackCore.calculateMonthlyProjection(items, todayStr(), 1);
-  heroBalances.today = balances.currentCents;
-  heroBalances.all = projection.length ? projection[0].closingCents : balances.projectedCents;
+  if (ym === cur) {
+    const balances = FintrackCore.calculateBalances(items, todayStr());
+    const projection = FintrackCore.calculateMonthlyProjection(items, todayStr(), 1, settings.closedMonths);
+    heroBalances.today = balances.currentCents;
+    heroBalances.all = projection.length ? projection[0].closingCents : balances.projectedCents;
+  } else {
+    heroBalances.today = heroBalances.all = totalI - totalE;
+  }
   updateHeroDisplay();
 
-  document.getElementById('totalExpense').textContent = fmt(pendingE);
   document.getElementById('totalIncome').textContent = fmt(totalI);
+  document.getElementById('totalExpense').textContent =
+    fmt(ym === cur ? sum(expenses.filter(i => !i.paid)) + openOverdueCents() : totalE);
+
+  const incLabel = document.getElementById('statIncomeLabel');
+  if (incLabel) incLabel.textContent = 'Entradas do mês';
+  const expLabel = document.getElementById('statExpenseLabel');
+  if (expLabel) expLabel.textContent = ym === cur ? 'A pagar no mês' : isMonthClosed(ym) ? 'Saídas do mês' : 'Saídas previstas';
 
   const paidCount = expenses.filter(i => i.paid).length;
   const total = expenses.length;
@@ -325,13 +376,26 @@ function calcTotals() {
 }
 
 function updateHeroDisplay() {
+  const cur = currentMonthStr();
+  const isCur = homeMonth === cur;
+  document.getElementById('toggleToday').style.display = isCur ? '' : 'none';
+  document.getElementById('toggleAll').style.display = isCur ? '' : 'none';
+
   const value = heroView === 'today' ? heroBalances.today : heroBalances.all;
   const el = document.getElementById('heroBalance');
   el.textContent = fmtSigned(value);
   el.className = 'hero-balance ' + (value > 0 ? 'positive' : value < 0 ? 'negative' : 'zero');
-  const [year, month] = currentMonthStr().split('-').map(Number);
-  document.getElementById('heroSublabel').textContent =
-    heroView === 'today' ? 'disponível hoje' : `saldo no fim de ${MONTHS[month - 1]} de ${year}`;
+
+  let sub;
+  if (isCur) {
+    const [year, month] = cur.split('-').map(Number);
+    sub = heroView === 'today' ? 'disponível hoje' : `saldo no fim de ${MONTHS[month - 1]} de ${year}`;
+  } else if (isMonthClosed(homeMonth)) {
+    sub = `fechamento de ${monthLabel(homeMonth)}`;
+  } else {
+    sub = `saldo planejado de ${monthLabel(homeMonth)}`;
+  }
+  document.getElementById('heroSublabel').textContent = sub;
 }
 
 function setHeroView(view) {
@@ -358,7 +422,7 @@ function updateBalanceToggle() {
 
 function renderTodayBadge() {
   const today = todayStr();
-  const n = items.filter(i => i.type === 'expense' && !i.paid && i.date === today).length;
+  const n = items.filter(i => i.type === 'expense' && !i.paid && i.date === today && !isMonthClosed(today.slice(0, 7))).length;
   const badge = document.getElementById('todayBadge');
   if (n > 0) { badge.textContent = n; badge.style.display = 'inline-flex'; }
   else badge.style.display = 'none';
@@ -368,6 +432,7 @@ function renderTodayBadge() {
    Render principal
    ═══════════════════════════════════════════ */
 function render() {
+  syncClosedMonths();
   spawnRecurring();
   calcTotals();
   if (currentView === 'home') renderHome();
@@ -388,44 +453,142 @@ function switchView(v) {
 
 /* ─── Home (lista) ───────────────────────── */
 function renderHome() {
+  renderMonthBar();
   const wrap = document.getElementById('listWrap');
-  let filtered;
-  if (currentTab === 'open') filtered = items.filter(i => i.type === 'expense' && !i.paid);
-  else if (currentTab === 'done') filtered = items.filter(i => i.type === 'expense' && i.paid);
-  else if (currentTab === 'in') filtered = items.filter(i => i.type === 'income');
-  else filtered = [...items];
+  const cur = currentMonthStr();
+  const ym = homeMonth;
+  const closed = isMonthClosed(ym);
+  const isCur = ym === cur;
 
   if (searchTerm.trim()) {
     const q = normalize(searchTerm);
-    filtered = filtered.filter(i => normalize(i.name).includes(q) || normalize(i.category || '').includes(q));
-  }
+    let base;
+    if (currentTab === 'open') base = items.filter(i => i.type === 'expense' && !i.paid);
+    else if (currentTab === 'done') base = items.filter(i => i.type === 'expense' && i.paid);
+    else if (currentTab === 'in') base = items.filter(i => i.type === 'income');
+    else base = [...items];
+    base = base.filter(i => normalize(i.name).includes(q) || normalize(i.category || '').includes(q));
 
-  if (!filtered.length) {
-    wrap.innerHTML = searchTerm.trim()
-      ? `<div class="empty"><div class="empty-icon">🔍</div><p>Nenhum resultado para "<b>${escapeHtml(searchTerm.trim())}</b>".</p><button type="button" class="empty-cta" data-action="clear-search">Limpar busca</button></div>`
-      : `<div class="empty"><div class="empty-icon">📭</div><p>Nada por aqui ainda.<br>Adicione seu primeiro lançamento para começar.</p><button type="button" class="empty-cta" data-action="open-sheet">Adicionar lançamento</button></div>`;
+    if (!base.length) {
+      wrap.innerHTML = `<div class="empty"><div class="empty-icon">🔍</div><p>Nenhum resultado para "<b>${escapeHtml(searchTerm.trim())}</b>".</p><button type="button" class="empty-cta" data-action="clear-search">Limpar busca</button></div>`;
+      return;
+    }
+    wrap.innerHTML = renderMonthGroups(sortByUrgency(base), currentTab, cur);
+    setupSwipeListeners();
     return;
   }
 
-  const sorted = sortByUrgency(filtered);
-  const today = todayStr();
-  const cur = currentMonthStr();
-  const separateUrgent = currentTab === 'all' || currentTab === 'open';
-  let html = '';
+  let scoped = items.filter(i => inMonth(i.date, ym) || (!i.date && isCur));
+  if (currentTab === 'open') scoped = scoped.filter(i => i.type === 'expense' && !i.paid);
+  else if (currentTab === 'done') scoped = scoped.filter(i => i.type === 'expense' && i.paid);
+  else if (currentTab === 'in') scoped = scoped.filter(i => i.type === 'income');
 
-  if (separateUrgent) {
-    const overdueItems = sorted.filter(i => i.type === 'expense' && !i.paid && i.date && i.date < today);
-    const todayItems = sorted.filter(i => i.type === 'expense' && !i.paid && i.date === today);
-    const rest = sorted.filter(i => !(i.type === 'expense' && !i.paid && i.date && i.date <= today));
-    if (overdueItems.length) html += renderSection('🔴 Vencidas', overdueItems, 'section-overdue', fmt(sum(overdueItems)));
-    if (todayItems.length) html += renderTodaySection(todayItems);
-    html += renderMonthGroups(rest, currentTab, cur);
+  let html = '';
+  if (closed) html += renderClosingCard(ym);
+
+  if (!scoped.length) {
+    if (isCur) {
+      html += `<div class="empty"><div class="empty-icon">📭</div><p>Nada por aqui ainda.<br>Adicione seu primeiro lançamento para começar.</p><button type="button" class="empty-cta" data-action="open-sheet">Adicionar lançamento</button></div>`;
+    } else if (closed) {
+      html += `<div class="empty"><div class="empty-icon">🔒</div><p>Nenhum lançamento registrado em <b>${monthLabel(ym)}</b>.</p></div>`;
+    } else {
+      html += `<div class="empty"><div class="empty-icon">🗓️</div><p>Nada agendado para <b>${monthLabel(ym)}</b> ainda.</p><button type="button" class="empty-cta" data-action="open-sheet">Adicionar lançamento</button></div>`;
+    }
+    wrap.innerHTML = html;
+    return;
+  }
+
+  if (closed || currentTab === 'done' || currentTab === 'in') {
+    const sorted = [...scoped].sort((a, b) =>
+      String(a.date || '').localeCompare(String(b.date || '')) || (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0));
+    const title = currentTab === 'in' ? 'Entradas' : currentTab === 'open' ? 'Em aberto' : 'Lançamentos';
+    html += renderSection(title, sorted, 'section-month', groupMeta(sorted, currentTab));
   } else {
-    html += renderMonthGroups(sorted, currentTab, cur);
+    const today = todayStr();
+    const sorted = sortByUrgency(scoped);
+    const overdueItems = sorted.filter(i => i.type === 'expense' && !i.paid && i.date && i.date < today);
+    const todayItems = isCur ? sorted.filter(i => i.type === 'expense' && !i.paid && i.date === today) : [];
+    const rest = sorted.filter(i => !(i.type === 'expense' && !i.paid && i.date && i.date <= today));
+    if (overdueItems.length) html += renderSection('Vencidas', overdueItems, 'section-overdue', fmt(sum(overdueItems)));
+    if (todayItems.length) html += renderTodaySection(todayItems);
+    if (rest.length) {
+      const restTitle = isCur ? 'A seguir' : `Agendadas · ${MONTHS[Number(ym.slice(5, 7)) - 1]}`;
+      html += renderSection(restTitle, rest, 'section-month', groupMeta(rest, currentTab));
+    }
   }
 
   wrap.innerHTML = html;
   setupSwipeListeners();
+}
+
+function renderMonthBar() {
+  const bar = document.getElementById('monthBar');
+  if (!bar) return;
+  const months = homeMonths();
+  const cur = currentMonthStr();
+  const curYear = new Date().getFullYear();
+  const chips = months.map(ym => {
+    const [y, m] = ym.split('-').map(Number);
+    const short = MONTHS[m - 1].slice(0, 3);
+    const label = y !== curYear ? `${short}/${String(y).slice(2)}` : short;
+    const cls = ['month-chip'];
+    if (ym === homeMonth) cls.push('active');
+    if (ym === cur) cls.push('is-current');
+    if (isMonthClosed(ym)) cls.push('is-closed');
+    return `<button type="button" class="${cls.join(' ')}" data-action="select-month" data-month="${ym}" aria-label="${monthLabel(ym)}">
+      ${isMonthClosed(ym) ? '<span class="month-chip-lock">🔒</span>' : ''}<span>${label}</span>
+      ${ym === cur ? '<span class="month-chip-dot"></span>' : ''}
+    </button>`;
+  }).join('');
+  bar.innerHTML = `
+    <button type="button" class="month-arrow" data-action="home-month" data-delta="-1" aria-label="Mês anterior">‹</button>
+    <div class="month-chips">${chips}</div>
+    <button type="button" class="month-arrow" data-action="home-month" data-delta="1" aria-label="Próximo mês">›</button>`;
+}
+
+function changeHomeMonth(delta) {
+  const months = homeMonths();
+  let idx = months.indexOf(homeMonth);
+  if (idx === -1) idx = months.indexOf(currentMonthStr());
+  idx = Math.min(months.length - 1, Math.max(0, idx + Number(delta) || 0));
+  if (months[idx] !== homeMonth) {
+    homeMonth = months[idx];
+    render();
+  }
+}
+
+function selectHomeMonth(ym) {
+  if (!ym || ym === homeMonth) return;
+  homeMonth = ym;
+  render();
+}
+
+function renderClosingCard(ym) {
+  const exps = monthExpenses(ym);
+  const incs = monthIncome(ym);
+  const inc = sum(incs);
+  const exp = sum(exps);
+  const saldo = inc - exp;
+  const paid = exps.filter(i => i.paid).length;
+  return `
+  <div class="closing-card">
+    <div class="closing-head">
+      <span class="closing-icon">🔒</span>
+      <div class="closing-head-text">
+        <span class="closing-title">Mês fechado</span>
+        <span class="closing-sub">${monthLabel(ym)} · ${exps.length} despesa(s), ${paid} paga(s) · ${incs.length} entrada(s)</span>
+      </div>
+    </div>
+    <div class="closing-stats">
+      <div class="closing-stat"><span>Entradas</span><b class="green">+${fmt(inc)}</b></div>
+      <div class="closing-stat"><span>Saídas</span><b class="red">−${fmt(exp)}</b></div>
+    </div>
+    <div class="closing-total">
+      <span>Saldo do mês</span>
+      <b class="${saldo >= 0 ? 'green' : 'red'}">${fmtSigned(saldo)}</b>
+    </div>
+    <p class="closing-note">Este mês foi encerrado. Os lançamentos ficam no histórico e continuam contando no seu saldo geral.</p>
+  </div>`;
 }
 
 function renderMonthGroups(list, tab, cur) {
@@ -441,7 +604,8 @@ function renderMonthGroups(list, tab, cur) {
     if (!key) return renderSection('Sem data', group, 'section-normal', groupMeta(group, tab));
     const hasOverdue = key < cur && group.some(i => i.type === 'expense' && !i.paid);
     const cls = 'section-month ' + (key === cur ? 'section-current' : hasOverdue ? 'section-overdue' : 'section-normal');
-    return renderSection(monthLabel(key), group, cls, groupMeta(group, tab));
+    const tag = isMonthClosed(key) ? '<span class="tag-closed">fechado</span>' : '';
+    return renderSection(`${monthLabel(key)}${tag}`, group, cls, groupMeta(group, tab));
   }).join('');
 }
 
@@ -482,7 +646,7 @@ function renderTodaySection(list) {
 }
 
 function renderSection(title, list, cls, meta) {
-  let html = `<div class="section-group ${cls || ''}"><div class="section-title-row"><span class="section-title-text">${title}</span>${meta ? `<span class="section-title-meta">${meta}</span>` : ''}</div>`;
+  let html = `<div class="section-group ${cls || ''}"><div class="section-title-row"><span class="section-title-text">${title}${list.length ? `<span class="section-count">${list.length}</span>` : ''}</span>${meta ? `<span class="section-title-meta">${meta}</span>` : ''}</div>`;
   list.forEach(it => { html += renderItem(it); });
   return html + '</div>';
 }
@@ -490,11 +654,14 @@ function renderSection(title, list, cls, meta) {
 function renderItem(it, isToday) {
   const status = dueStatus(it.date);
   const isExpense = it.type === 'expense';
+  const closedMonth = it.date ? isMonthClosed(it.date.slice(0, 7)) : false;
   const icon = escapeHtml((it.category || '📦 Outros').split(' ')[0]);
   const idAttr = escapeHtml(it.id);
 
   let badgeCls, badgeLabel, subLabel;
-  if (it.paid) {
+  if (closedMonth && !it.paid && isExpense) {
+    badgeCls = 'badge-muted'; badgeLabel = fmtDateFull(it.date); subLabel = '';
+  } else if (it.paid) {
     badgeCls = 'badge-green'; badgeLabel = 'Paga';
     subLabel = it.date ? (status ? status.label.replace('Venceu', 'venceu').replace('Hoje', 'hoje') : fmtDateFull(it.date)) : '';
   } else if (status) {
@@ -503,7 +670,7 @@ function renderItem(it, isToday) {
     badgeCls = ''; badgeLabel = ''; subLabel = '';
   }
 
-  const urgencyClass = !it.paid && isExpense ? getUrgencyItemClass(it) : '';
+  const urgencyClass = !it.paid && isExpense && !closedMonth ? getUrgencyItemClass(it) : '';
   const todayClass = isToday ? 'item-today' : '';
   const paidClass = it.paid ? 'paid' : '';
 
@@ -1197,7 +1364,8 @@ function saveItem() {
     toast('Lançamento atualizado');
   } else {
     items.unshift({ id: newId(), name, valueCents, date, category: cat, type: currentType, paid: false, recurrence: recur, createdAt: Date.now() });
-    toast('Lançamento salvo');
+    const ym = date ? date.slice(0, 7) : '';
+    toast(ym && isMonthClosed(ym) ? `Salvo em ${monthLabel(ym)} — mês fechado` : 'Lançamento salvo');
   }
   save(); closeSheet(); render();
 }
@@ -1261,7 +1429,7 @@ function renderCalendar() {
   const header = `
     <div class="month-nav">
       <button data-action="change-month" data-delta="-1" aria-label="Mês anterior">‹</button>
-      <div class="month-nav-label">${monthLabel(viewMonth)}</div>
+      <div class="month-nav-label">${monthLabel(viewMonth)}${monthBadge(viewMonth)}</div>
       <button data-action="change-month" data-delta="1" aria-label="Próximo mês">›</button>
     </div>`;
 
@@ -1338,7 +1506,7 @@ function categoryTotals(ym) {
 }
 
 function monthlyProjection(count = 3) {
-  return FintrackCore.calculateMonthlyProjection(items, todayStr(), count);
+  return FintrackCore.calculateMonthlyProjection(items, todayStr(), count, settings.closedMonths);
 }
 
 function donutSVG(segs) {
@@ -1437,7 +1605,7 @@ function renderAnalysis() {
   const header = `
     <div class="month-nav">
       <button data-action="change-month" data-delta="-1" aria-label="Mês anterior">‹</button>
-      <div class="month-nav-label">${monthLabel(viewMonth)}</div>
+      <div class="month-nav-label">${monthLabel(viewMonth)}${monthBadge(viewMonth)}</div>
       <button data-action="change-month" data-delta="1" aria-label="Próximo mês">›</button>
     </div>`;
 
@@ -1740,9 +1908,10 @@ function computeAlerts() {
   const out = [];
   const today = todayStr();
   const tomorrow = localDateStr(new Date(Date.now() + 86400000));
-  const todayItems = items.filter(i => i.type === 'expense' && !i.paid && i.date === today);
-  const tomorrowItems = items.filter(i => i.type === 'expense' && !i.paid && i.date === tomorrow);
-  const overdue = items.filter(i => i.type === 'expense' && !i.paid && i.date && i.date < today);
+  const scope = items.filter(i => !i.date || !isMonthClosed(i.date.slice(0, 7)));
+  const todayItems = scope.filter(i => i.type === 'expense' && !i.paid && i.date === today);
+  const tomorrowItems = scope.filter(i => i.type === 'expense' && !i.paid && i.date === tomorrow);
+  const overdue = scope.filter(i => i.type === 'expense' && !i.paid && i.date && i.date < today);
 
   if (settings.alerts.due) {
     if (overdue.length) out.push({ key: 'overdue:' + today, type: 'danger', text: `${overdue.length} conta(s) vencida(s) — ${fmt(sum(overdue))}.` });
@@ -1750,7 +1919,7 @@ function computeAlerts() {
     if (tomorrowItems.length) out.push({ key: 'due-tom:' + today, type: 'info', text: `${tomorrowItems.length} conta(s) vencem amanhã.` });
   }
 
-  if (settings.alerts.budget) {
+  if (settings.alerts.budget && !isMonthClosed(currentMonthStr())) {
     EXPENSE_CATEGORIES.forEach(cat => {
       const limit = budgetLimit(cat);
       if (!limit) return;
@@ -1796,12 +1965,37 @@ function renderAlerts() {
 /* ═══════════════════════════════════════════
    MENU / CONFIGURAÇÕES / SNAPSHOTS
    ═══════════════════════════════════════════ */
-function openMenu() { updateMenuInfo(); document.getElementById('menuPanel').classList.add('open'); }
+function openMenu() { updateMenuInfo(); updateCloseMonthButton(); document.getElementById('menuPanel').classList.add('open'); }
 function closeMenu() { document.getElementById('menuPanel').classList.remove('open'); }
 function closeMenuOnBg(e) { if (e.target === document.getElementById('menuPanel')) closeMenu(); }
 function openPanel(id) { document.getElementById(id).classList.add('open'); }
 function closePanel(id) { document.getElementById(id).classList.remove('open'); }
 function closeOnBg2(e, id) { if (e.target === document.getElementById(id)) closePanel(id); }
+
+function updateCloseMonthButton() {
+  const btn = document.getElementById('menuCloseMonth');
+  if (!btn) return;
+  const cur = currentMonthStr();
+  const name = MONTHS[Number(cur.slice(5, 7)) - 1];
+  btn.textContent = isMonthClosed(cur) ? `🔓 Reabrir ${name} (mês atual)` : `🔒 Fechar ${name} (mês atual)`;
+}
+
+function toggleCloseMonth() {
+  const cur = currentMonthStr();
+  const name = monthLabel(cur);
+  if (isMonthClosed(cur)) {
+    settings.closedMonths = settings.closedMonths.filter(m => m !== cur);
+    saveSettings(); closeMenu(); render();
+    toast(`${name} reaberto`);
+    return;
+  }
+  const openLeft = items.filter(i => i.type === 'expense' && !i.paid && inMonth(i.date, cur)).length;
+  const warn = openLeft > 0 ? ` Ainda há ${openLeft} conta(s) em aberto neste mês.` : '';
+  if (!confirm(`Fechar ${name} agora? Os lançamentos deste mês ficam no histórico do mês.${warn}`)) return;
+  settings.closedMonths.push(cur);
+  saveSettings(); closeMenu(); render();
+  toast(`${name} fechado 🔒`);
+}
 
 function updateMenuInfo() {
   const el = document.getElementById('menuInfo');
@@ -2093,6 +2287,9 @@ function setupEvents() {
     'unlock': () => tryUnlock(),
     'snackbar-action': () => runSnackbarAction(),
     'change-month': el => changeMonth(Number(el.dataset.delta)),
+    'home-month': el => changeHomeMonth(Number(el.dataset.delta)),
+    'select-month': el => selectHomeMonth(el.dataset.month),
+    'toggle-close-month': () => toggleCloseMonth(),
     'set-projection-horizon': el => setProjectionHorizon(Number(el.dataset.months)),
     'show-day': el => showDay(el.dataset.date),
     'accept-recurrence': el => acceptRecurrence(Number(el.dataset.index)),

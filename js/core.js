@@ -111,6 +111,9 @@
     settings.projectionHorizon = [3, 6, 12].includes(horizon) ? horizon : 3;
     const advance = Math.round(Number(source.cashflowAdvanceDays));
     settings.cashflowAdvanceDays = Number.isFinite(advance) ? Math.min(60, Math.max(0, advance)) : 7;
+    settings.closedMonths = Array.isArray(source.closedMonths)
+      ? [...new Set(source.closedMonths.filter(ym => typeof ym === 'string' && /^\d{4}-\d{2}$/.test(ym)))].sort()
+      : [];
     settings.dataVersion = DATA_VERSION;
     settings.balanceHidden = !!settings.balanceHidden;
     settings.pin = source.pin && /^[a-f0-9]{32}$/i.test(source.pin.salt || '') && /^[a-f0-9]{64}$/i.test(source.pin.hash || '')
@@ -194,8 +197,9 @@
     return list;
   }
 
-  function calculateMonthlyProjection(items, today = localDateStr(), count = 3) {
+  function calculateMonthlyProjection(items, today = localDateStr(), count = 3, closedMonths = []) {
     const months = Math.min(24, Math.max(1, Math.floor(Number(count) || 3)));
+    const closed = new Set(Array.isArray(closedMonths) ? closedMonths : []);
     const currentYm = String(today || localDateStr()).slice(0, 7);
     const expanded = expandRecurring(items, currentYm, months);
     const balances = calculateBalances(expanded, today);
@@ -207,7 +211,8 @@
     const paidCurrentExpenses = sumCents(currentExpenses.filter(item => item.paid));
     let openingCents = balances.currentCents - realizedCurrentIncome + paidCurrentExpenses;
 
-    const overdue = expanded.filter(item => item.type === 'expense' && !item.paid && item.date && item.date.slice(0, 7) < currentYm);
+    const overdue = expanded.filter(item => item.type === 'expense' && !item.paid && item.date
+      && item.date.slice(0, 7) < currentYm && !closed.has(item.date.slice(0, 7)));
     const overdueCents = sumCents(overdue);
 
     const projection = [];

@@ -98,6 +98,26 @@ test('configurações normalizam horizonte e antecedência do alerta', () => {
   assert.equal(valid.cashflowAdvanceDays, 14);
 });
 
+test('meses fechados são normalizados, únicos e ordenados', () => {
+  const settings = core.migrateSettings({ closedMonths: ['2026-10', '2026-10', '2026-09', 'mes-inválido', 42] }, defaults);
+  assert.deepEqual(settings.closedMonths, ['2026-09', '2026-10']);
+  const empty = core.migrateSettings({}, defaults);
+  assert.deepEqual(empty.closedMonths, []);
+});
+
+test('projeção mensal ignora vencidas de meses já fechados', () => {
+  const items = [
+    { type: 'income', date: '2026-11-05', valueCents: 200000, paid: false },
+    { type: 'expense', date: '2026-11-10', valueCents: 50000, paid: false },
+    { type: 'expense', date: '2026-10-15', valueCents: 30000, paid: false }
+  ];
+  const aberto = core.calculateMonthlyProjection(items, '2026-11-20', 1);
+  assert.equal(aberto[0].overdueCents, 30000);
+  const fechado = core.calculateMonthlyProjection(items, '2026-11-20', 1, ['2026-10']);
+  assert.equal(fechado[0].overdueCents, 0);
+  assert.equal(fechado[0].closingCents, 150000);
+});
+
 test('backup versionado preserva configurações e rejeita itens inválidos', () => {
   const backup = core.createBackup([], { theme: 'light', pinHash: 'a'.repeat(64), pin: { salt: 'b'.repeat(32), hash: 'c'.repeat(64), iterations: 210000 } }, []);
   assert.equal(backup.settings.pin, null);

@@ -56,19 +56,21 @@
           <div class="stat stat-income">
             <div class="stat-icon">💰</div>
             <div class="stat-body">
-              <div class="stat-label">Entradas do mês</div>
+              <div class="stat-label" id="statIncomeLabel">Entradas do mês</div>
               <div class="stat-value green" id="totalIncome">R$ 0,00</div>
             </div>
           </div>
           <div class="stat stat-expense">
             <div class="stat-icon">📤</div>
             <div class="stat-body">
-              <div class="stat-label">A pagar no mês</div>
+              <div class="stat-label" id="statExpenseLabel">A pagar no mês</div>
               <div class="stat-value red" id="totalExpense">R$ 0,00</div>
             </div>
           </div>
         </div>
       </div>
+
+      <div class="month-bar" id="monthBar"></div>
 
       <div class="progress-wrap">
         <div class="progress-label">
@@ -238,6 +240,7 @@
       <button class="menu-item" data-action="export-backup">⬇️ Exportar backup (.json)</button>
       <button class="menu-item" data-action="trigger-import">⬆️ Importar backup</button>
       <button class="menu-item" data-action="open-snapshots">🕘 Histórico de versões</button>
+      <button class="menu-item" id="menuCloseMonth" data-action="toggle-close-month">🔒 Fechar mês atual</button>
       <button class="menu-item" data-action="open-settings">⚙️ Configurações</button>
       <button class="menu-item danger" data-action="clear-all">🗑️ Apagar tudo</button>
       <input type="file" id="importFile" accept="application/json">
